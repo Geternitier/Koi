@@ -181,6 +181,42 @@ async def test_llm_failure_is_reported_and_life_goes_on():
     assert sched.scheduled_at("autowake") is not None
 
 
+async def test_replies_carry_plugin_route_back():
+    answers = {"在吗": "在的", "大家好": "你好呀"}
+
+    def respond(schema, messages):
+        if schema is PerceiveOutput:
+            return {}
+        text = user_text(messages)
+        block = text[text.index("# 新事件") : text.index("# 此刻")]
+        replies = [
+            {"event": int(line.split(".")[0]), "text": answers[line.rsplit("：", 1)[1]]}
+            for line in block.splitlines()[1:]
+            if line[:1].isdigit()
+        ]
+        return {"replies": replies}
+
+    persona, sched, bus, _, sent = build(respond)
+    await persona.start()
+    t = T0 + timedelta(minutes=1)
+    owner_dm = owner(t, "在吗").model_copy(
+        update={"source": "qq", "payload": {"text": "在吗", "conversation": "private:1"}}
+    )
+    group = Event(
+        type="message",
+        priority=Priority.P1,
+        source="qq",
+        trust=Trust.EXTERNAL,
+        time=t,
+        payload={"text": "大家好", "sender": "阿明", "conversation": "group:9", "message_id": "m7"},
+    )
+    sched.call_at(t, partial(bus.publish, group))
+    sched.call_at(t, partial(bus.publish, owner_dm))
+    await sched.run_until(t + timedelta(seconds=1))
+    routes = {a["text"]: (p, a.get("conversation"), a.get("message_id")) for p, _, a in sent}
+    assert routes == {"在的": ("qq", "private:1", None), "你好呀": ("qq", "group:9", "m7")}
+
+
 async def test_alarm_from_act_output_is_scheduled():
     def respond(schema, messages):
         if schema is PerceiveOutput:

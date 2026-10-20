@@ -88,9 +88,15 @@ STATE_KEY = "persona.state"
 MATERIAL: frozenset[EntryKind] = frozenset({"in", "out", "thought", "activity", "decision", "tool"})
 # 来自核心自身的事件（闹钟、审批），回复时走主人最近用的渠道
 CORE_SOURCE_PREFIX = "core."
+# 插件在事件 payload 里填的路由信息，回复时原样带回 send_message（见 docs/plugin-spec.md）
+REPLY_ROUTE_KEYS = ("conversation", "message_id")
 
 AWAKE_MASK = Priority.P1
 SLEEP_MASK = Priority.P0
+
+
+def _reply_route(event: Event) -> dict[str, Any]:
+    return {k: event.payload[k] for k in REPLY_ROUTE_KEYS if k in event.payload}
 
 
 @dataclass(frozen=True)
@@ -788,11 +794,10 @@ class Persona:
             else:
                 continue
             self._journal(now, "out", reply.text, who=plugin)
-            await self._actuate(
-                plugin,
-                "send_message",
-                {"text": reply.text, "reply_to": target.id if target else None},
-            )
+            args: dict[str, Any] = {"text": reply.text, "reply_to": target.id if target else None}
+            if target is not None and target.source == plugin:
+                args.update(_reply_route(target))
+            await self._actuate(plugin, "send_message", args)
 
     async def _actuate(self, plugin: str, capability: str, args: dict[str, Any]) -> None:
         if self.actuator is None:
@@ -805,11 +810,9 @@ class Persona:
     async def _notify_error(self, events: list[Event], error: Exception) -> None:
         for e in events:
             if e.trust == Trust.OWNER:
-                await self._actuate(
-                    e.source,
-                    "send_message",
-                    {"text": f"（思考出错：{type(error).__name__}）", "system": True},
-                )
+                text = f"（思考出错：{type(error).__name__}）"
+                args = {"text": text, "system": True, **_reply_route(e)}
+                await self._actuate(e.source, "send_message", args)
                 return
 
     def _journal(self, t: datetime, kind: EntryKind, text: str, who: str = "") -> None:
