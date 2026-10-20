@@ -1,13 +1,16 @@
 """组装根：把内核、人格体与插件接在一起并运行。
 
-uv run koi run [--port 8765] [--data-dir PATH]
+koi init [DIR] [--template NAME | --from PATH] [--name NAME]   在目录里创建人格体
+koi run [DIR]                                                 启动（默认从当前目录往上找实例）
+koi list                                                      列出本机的人格体
+koi templates                                                 列出内置人设模板
 """
 
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,18 @@ import yaml
 
 from koi.kernel import EventBus, RealClock, Scheduler, Store
 from koi.kernel.approvals import ApprovalService
+from koi.kernel.instance import (
+    CONFIG_NAME,
+    DEFAULT_PORT,
+    Instance,
+    InstanceError,
+    InstanceLock,
+    Registry,
+    default_instance,
+    find_instance,
+    load_instance,
+    pick_port,
+)
 from koi.kernel.llm import LLMConfig, LLMGateway
 from koi.kernel.paths import KoiPaths
 from koi.kernel.plugins import PluginHost
@@ -35,14 +50,28 @@ from koi.persona import (
     ToolSpec,
     load_params,
     load_profile,
+    templates,
 )
 from koi.persona.core import STATE_KEY
 from koi.persona.llm_mind import LLMMind
+from koi.persona.templates import TemplateError
 from koi.plugins.web import WebPlugin
 
 log = logging.getLogger("koi")
 
-DEFAULTS = Path(__file__).parent / "persona" / "defaults"
+INSTANCE_CONFIG = """\
+# 人格体实例配置（由主人维护，修改后重启 koi 生效）。
+# 人设在 data/persona/profile.md 和 params.yaml 里。
+
+# Web 界面端口
+port: {port}
+# Harness 工作区，相对路径从这个目录算起
+workspace: {workspace}
+# 是否启动 Harness（本机文件与 Shell）
+harness: true
+# 覆盖 LLM 模型名，留空用默认
+model: null
+"""
 
 HARNESS_SETTINGS = """\
 # Harness 设置（由主人维护，修改后重启 koi 生效）。
@@ -64,20 +93,19 @@ approval_ttl_min: 30
 """
 
 
-def ensure_persona_files(paths: KoiPaths) -> None:
-    for name in ("profile.md", "params.yaml"):
-        target = paths.persona / name
-        if not target.exists():
-            shutil.copyfile(DEFAULTS / name, target)
-
-
-def harness_spec(paths: KoiPaths) -> PluginSpec:
+def harness_spec(instance: Instance, registry: Registry) -> PluginSpec:
+    paths = instance.paths
     settings_path = paths.plugins / "harness" / "settings.yaml"
     if not settings_path.exists():
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         settings_path.write_text(HARNESS_SETTINGS, encoding="utf-8")
     settings = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    settings.update(workspace=str(paths.workspace), blacklist=[str(paths.data)])
+    # 这几项由核心决定，配置文件里写了也会被覆盖
+    blacklist = [str(p) for p in instance.protected]
+    blacklist.append(str(KoiPaths.default().data))  # 默认实例和登记表所在
+    settings.update(
+        workspace=str(paths.workspace), blacklist=blacklist, registry=str(registry.path)
+    )
     return PluginSpec(
         id="harness",
         entry=[sys.executable, "-m", "koi.plugins.harness"],
@@ -105,12 +133,85 @@ def setup_logging(paths: KoiPaths, redactor: Redactor, verbose: bool) -> None:
     logging.getLogger("openai").setLevel(logging.WARNING)
 
 
+def resolve_instance(directory: str | None) -> Instance:
+    if directory:
+        return load_instance(Path(directory))
+    return find_instance(Path.cwd()) or default_instance()
+
+
+def init(args: argparse.Namespace, registry: Registry) -> Instance:
+    root = Path(args.dir or ".").resolve()
+    config_path = root / CONFIG_NAME
+    if config_path.exists():
+        raise InstanceError(f"{root} 已经是人格体实例目录了")
+    data = root / "data"
+    if data.exists() and any(data.iterdir()):
+        raise InstanceError(f"{data} 已存在且不为空")
+    source = Path(args.source) if args.source else None
+    templates.resolve(args.template, source)  # 先检查人设，避免留下半成品
+
+    # 默认实例固定用 DEFAULT_PORT，即使它还没登记过
+    port = args.port or pick_port(registry.ports() | {DEFAULT_PORT})
+    workspace = json.dumps(args.workspace or "workspace", ensure_ascii=False)
+    root.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(INSTANCE_CONFIG.format(port=port, workspace=workspace), "utf-8")
+    try:
+        instance = load_instance(root)
+    except InstanceError:
+        config_path.unlink()
+        raise
+    instance.paths.ensure()
+    profile = templates.install(
+        instance.paths.persona, template=args.template, source=source, name=args.name
+    )
+    registry.register(instance, profile.name)
+    print(f"已创建人格体「{profile.name}」：{root}")
+    print(f"  人设：{instance.paths.persona / 'profile.md'}")
+    print(f"  工作区：{instance.paths.workspace}")
+    print(f"  端口：{port}")
+    print(f'启动：cd "{root}"; koi run')
+    return instance
+
+
+def list_instances(registry: Registry) -> None:
+    records = registry.records()
+    if not records:
+        print("还没有人格体。用 koi init 创建，或直接 koi run 启动默认实例。")
+        return
+    for r in records:
+        info = InstanceLock.probe(Path(r.data))
+        if info is None:
+            status = "未运行"
+        else:
+            status = (
+                f"运行中 http://127.0.0.1:{info.get('port', '?')}（PID {info.get('pid', '?')}）"
+            )
+        print(f"{r.name}\t{status}\t{r.root}")
+
+
+def list_templates() -> None:
+    for key, profile in templates.list_templates().items():
+        default = "（默认）" if key == templates.DEFAULT_TEMPLATE else ""
+        print(f"{key}\t{profile.name}{default}")
+
+
 async def run(args: argparse.Namespace) -> None:
-    paths = KoiPaths.default()
-    if args.data_dir:
-        paths = KoiPaths(data=Path(args.data_dir), workspace=paths.workspace)
+    instance = resolve_instance(args.dir)
+    paths = instance.paths
+    port = args.port or instance.config.port
     paths.ensure()
-    ensure_persona_files(paths)
+    lock = InstanceLock(paths.data)
+    lock.acquire(port=port, root=str(instance.root))
+    try:
+        await _run(args, instance, port)
+    finally:
+        lock.release()
+
+
+async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
+    paths = instance.paths
+    templates.ensure(paths.persona)
+    registry = Registry.default()
 
     secrets = SecretStore()
     redactor = Redactor.from_store(secrets)
@@ -118,7 +219,9 @@ async def run(args: argparse.Namespace) -> None:
 
     params = load_params(paths.persona / "params.yaml")
     profile = load_profile(paths.persona / "profile.md")
-    overrides: dict[str, Any] = {"model": args.model} if args.model else {}
+    registry.register(instance, profile.name)
+    model = args.model or instance.config.model
+    overrides: dict[str, Any] = {"model": model} if model else {}
     gateway = LLMGateway(LLMConfig.from_secrets(secrets, **overrides))
 
     store = Store(paths.db)
@@ -127,11 +230,11 @@ async def run(args: argparse.Namespace) -> None:
     bus = EventBus()
     approvals = ApprovalService(bus, clock)
     host = PluginHost(bus, clock, approvals=approvals, store=store, redact=redactor)
-    host.add(WebPlugin(port=args.port))
+    host.add(WebPlugin(port=port))
     env = scrubbed_env(secrets)
     specs = load_specs(paths.plugins)
-    if not args.no_harness:
-        specs.insert(0, harness_spec(paths))
+    if instance.config.harness and not args.no_harness:
+        specs.insert(0, harness_spec(instance, registry))
     for spec in specs:
         host.add(ProcessPlugin(spec, env=env))
 
@@ -189,7 +292,7 @@ async def run(args: argparse.Namespace) -> None:
     host.set_state_provider(state)
     await persona.start()
     await host.start()
-    print(f"{profile.name} 已启动：http://127.0.0.1:{args.port}  （数据目录：{paths.data}）")
+    print(f"{profile.name} 已启动：http://127.0.0.1:{port}  （实例：{instance.root}）")
     try:
         await scheduler.run_forever()
     finally:
@@ -201,18 +304,41 @@ async def run(args: argparse.Namespace) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(prog="koi")
     sub = ap.add_subparsers(dest="command", required=True)
+
+    init_p = sub.add_parser("init", help="在目录里创建一个人格体")
+    init_p.add_argument("dir", nargs="?", help="实例目录，默认当前目录")
+    group = init_p.add_mutually_exclusive_group()
+    group.add_argument("--template", help="内置人设模板（koi templates 查看）")
+    group.add_argument(
+        "--from", dest="source", help="自己的人设：profile.md，或含 profile.md 的目录"
+    )
+    init_p.add_argument("--name", help="给她起名（覆盖人设里的名字）")
+    init_p.add_argument("--port", type=int, help="Web 端口，默认自动挑一个空闲的")
+    init_p.add_argument("--workspace", help="Harness 工作区，默认是实例目录下的 workspace")
+
     run_p = sub.add_parser("run", help="启动人格体与插件")
-    run_p.add_argument("--port", type=int, default=8765)
-    run_p.add_argument("--data-dir", help="数据目录，默认按平台惯例")
+    run_p.add_argument("dir", nargs="?", help="实例目录，默认从当前目录往上找，找不到用默认实例")
+    run_p.add_argument("--port", type=int, help="覆盖 koi.yaml 里的端口")
     run_p.add_argument("--model", help="覆盖 LLM 模型名")
     run_p.add_argument("--no-harness", action="store_true", help="不启动 Harness（文件与 Shell）")
     run_p.add_argument("-v", "--verbose", action="store_true", help="在控制台输出 INFO 日志")
+
+    sub.add_parser("list", help="列出本机的人格体")
+    sub.add_parser("templates", help="列出内置人设模板")
     args = ap.parse_args()
 
     try:
-        with contextlib.suppress(KeyboardInterrupt):
-            asyncio.run(run(args))
-    except MissingSecretError as e:
+        match args.command:
+            case "init":
+                init(args, Registry.default())
+            case "list":
+                list_instances(Registry.default())
+            case "templates":
+                list_templates()
+            case "run":
+                with contextlib.suppress(KeyboardInterrupt):
+                    asyncio.run(run(args))
+    except (MissingSecretError, InstanceError, TemplateError) as e:
         print(e, file=sys.stderr)
         sys.exit(2)
 

@@ -551,7 +551,7 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 
 除了检查客户端地址，还检查 `Host` 头必须是 `127.0.0.1`、`::1` 或 `localhost`，防止 DNS 重绑定：恶意网页把自己的域名解析到 127.0.0.1 后，浏览器发来的 Host 仍是它的域名。界面侧栏有"等你批准"卡片（批准 / 拒绝按钮）和可折叠的"操作记录"。
 
-启动：`uv run koi run [--port 8765] [--data-dir DIR] [--model deepseek-chat] [--no-harness] [-v]`，然后打开 http://127.0.0.1:8765 。API key 从用户变量 `CHAT_DEEPSEEK` 读取，日志经 `RedactingFilter` 脱敏。
+启动：`koi run [DIR] [--port N] [--model deepseek-chat] [--no-harness] [-v]`（见 §6.10），然后打开界面。API key 从用户变量 `CHAT_DEEPSEEK` 读取，日志经 `RedactingFilter` 脱敏。
 
 ### 6.9 进程外插件、审批与工具使用（当前实现）
 
@@ -620,6 +620,45 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 
 尚未实现：核心数据目录的哈希校验和 git 版本化（§3.4 第 5 点）、授权期限（单次 / 本次唤醒 / 永久）的细分、MCP 服务器适配器。
 
+### 6.10 人格体实例（`koi.kernel.instance`、`koi.persona.templates`）
+
+一个进程承载一个人格体。实例可以建在任意目录，人设从模板复制进去，之后和模板互不影响。
+
+```
+koi templates                         # 内置人设模板（目前只有 xiaoli，即小鲤）
+koi init D:\Personas\雪 --name 雪      # 用默认模板建实例，并改名
+koi init . --from D:\my\profile.md    # 用自己的人设（文件，或含 profile.md / params.yaml 的目录）
+koi run                               # 从当前目录往上找 koi.yaml；找不到时用默认实例
+koi run D:\Personas\雪
+koi list                              # 本机所有实例及是否在运行
+```
+
+**实例目录布局**：
+
+```
+<root>/koi.yaml      port、workspace（默认 workspace，相对路径从 root 算）、harness、model
+<root>/data/         核心数据目录（persona/ state/ memory/ plugins/ koi.db logs/）
+<root>/workspace/    Harness 工作区
+```
+
+- **布局约束**：数据目录和工作区是兄弟目录，工作区不允许放进数据目录。
+- **默认实例**：没有 `koi.yaml` 时使用，数据在平台数据目录，工作区在"文档/KoiWorkspace"，端口固定为 8765。`koi init` 自动挑选端口时会跳过 8765 和已登记的端口。
+- **改名**：`--name` 改写 front-matter 里的 name，正文里的旧名字也一并替换。和名字相关的其他描述（比如"名字来自锦鲤"）需要手动改。
+
+**登记表**：`<平台数据目录>/instances.json`，在 `init` 和 `run` 时更新。每条记录含 root、data、name、port，以及 protected（数据目录和 `koi.yaml`）。目录已被删掉的实例不再列出。
+
+**人格体之间互相隔离**：
+
+- **启动时写入的黑名单**：每个实例的 Harness 黑名单包括自己的数据目录和 `koi.yaml`，以及平台数据目录（默认实例和登记表所在）。`koi.yaml` 也必须禁止：改了它就等于给自己换工作区、开权限。
+- **运行中动态读登记表**：Harness 运行时还会读登记表，按文件修改时间缓存，把所有实例的 protected 路径都当作黑名单。运行中新建的实例立即受保护；登记表损坏时沿用上一次读到的结果。
+
+**单实例锁**：
+
+- **加锁**：启动时对 `data/koi.lock` 加操作系统级的文件锁（Windows `msvcrt.locking`，macOS `fcntl.flock`），把 PID、端口写进 `data/run.json`。第二个进程启动时报错退出，并给出正在运行的那个的 PID 和端口。
+- **自动释放**：进程崩溃时锁由操作系统收回，不会卡住。`koi list` 通过试探加锁判断实例是否在运行。
+
+**全局命令**：`uv tool install --editable <仓库目录>` 把 `koi` 装成全局命令，源码改动立即生效。`uv tool update-shell` 会把 `~/.local/bin` 加进 PATH。
+
 ---
 
 ## 7. 补充模块与机制
@@ -650,8 +689,10 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 
 ## 9. 数据目录布局
 
+实例目录和默认实例见 §6.10；下面是数据目录内部：
+
 ```
-<data_dir>/koi/                 # 核心数据目录，Harness 永远不可访问
+<data_dir>/                     # 核心数据目录，任何实例的 Harness 都不可访问
   persona/                      # 设定，只能由配置服务写入
     profile.md                  # 多方面角色描述
     params.yaml                 # 作息相位、心情基线、Big Five、意愿阈值、兴趣

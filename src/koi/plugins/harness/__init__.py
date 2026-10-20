@@ -11,6 +11,7 @@ Shell 的工作目录是工作区；按 shell_policy 决定哪些命令需要审
 """
 
 import asyncio
+import json
 import os
 import re
 import shlex
@@ -66,6 +67,8 @@ class Grant(BaseModel):
 class HarnessSettings(BaseModel):
     workspace: str
     blacklist: list[str] = Field(default_factory=list)
+    # 实例登记表（JSON），其中每个实例的 protected 路径也一律禁止；运行中新建的实例同样生效
+    registry: str | None = None
     grants: list[Grant] = Field(default_factory=list)
     shell_policy: ShellPolicy = "whitelist"
     shell_timeout_s: float = 60.0
@@ -103,6 +106,7 @@ class HarnessPlugin:
         self._approved_once: dict[str, datetime] = {}
         # 读取批准：目录 -> 过期时间
         self._approved_read: dict[str, datetime] = {}
+        self._registry_cache: tuple[float, list[str]] = (-1.0, [])
 
     # ------------------------------------------------------------------ 插件接口
 
@@ -270,7 +274,7 @@ class HarnessPlugin:
         if not command:
             return {"ok": False, "error": "命令为空"}
         s = self._s
-        if any(_norm(b) in os.path.normcase(command) for b in s.blacklist):
+        if any(_norm(b) in os.path.normcase(command) for b in self.protected()):
             return {"ok": False, "error": "命令涉及禁止访问的位置"}
         if s.shell_policy != "trust" and not (
             s.shell_policy == "whitelist" and self.is_auto_command(command)
@@ -293,8 +297,30 @@ class HarnessPlugin:
             p = Path(self._s.workspace) / p
         return Path(os.path.realpath(p))
 
+    def protected(self) -> list[str]:
+        """核心数据：本实例的黑名单加上登记表里所有实例的数据目录和配置。"""
+        return [*self._s.blacklist, *self._registry_protected()]
+
     def blacklist(self) -> list[str]:
-        return [*self._s.blacklist, *(WINDOWS_SYSTEM if IS_WINDOWS else POSIX_SYSTEM)]
+        return [*self.protected(), *(WINDOWS_SYSTEM if IS_WINDOWS else POSIX_SYSTEM)]
+
+    def _registry_protected(self) -> list[str]:
+        if not self._s.registry:
+            return []
+        path = Path(self._s.registry)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return self._registry_cache[1]
+        if mtime != self._registry_cache[0]:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                paths = [str(p) for r in raw.get("instances", []) for p in r.get("protected", [])]
+            except (OSError, ValueError, AttributeError):
+                # 读不出来时沿用上次的结果，宁可多禁不可少禁
+                return self._registry_cache[1]
+            self._registry_cache = (mtime, paths)
+        return self._registry_cache[1]
 
     def scope(self, path: Path, op: Literal["read", "write"]) -> Literal["deny", "allow", "ask"]:
         if any(within(path, b) for b in self.blacklist()):
