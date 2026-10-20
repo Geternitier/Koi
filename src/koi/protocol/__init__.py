@@ -14,8 +14,12 @@ PROTOCOL_VERSION = "koi/0.1"
 
 TrustLevel = Literal["owner", "known_person", "external"]
 # approve：查看与处理审批、查看审计记录。只授予主人使用的界面类插件
-Permission = Literal["approve"]
+# owner_ui：向主人展示交互请求、提交主人填写的内容。只授予主人使用的界面类插件
+# interact：向主人发起交互请求（扫码、填验证码等）
+Permission = Literal["approve", "owner_ui", "interact"]
 ApprovalStatus = Literal["pending", "approved", "denied", "expired"]
+InteractionKind = Literal["display", "form"]
+InteractionStatus = Literal["pending", "submitted", "done", "failed", "cancelled", "expired"]
 
 
 class Capability(BaseModel):
@@ -38,6 +42,8 @@ class Manifest(BaseModel):
     # 进程外插件以核心侧配置为准，插件自报的值无效
     max_trust: TrustLevel = "external"
     permissions: list[Permission] = Field(default_factory=list)
+    # 插件可以读写的凭据名，存于系统钥匙串的 plugin.<id>.<name>；进程外插件以核心侧配置为准
+    secrets: list[str] = Field(default_factory=list)
 
 
 class EventIn(BaseModel):
@@ -63,6 +69,44 @@ class Approval(BaseModel):
     created_at: datetime
     status: ApprovalStatus = "pending"
     resolved_at: datetime | None = None
+
+
+class InteractionField(BaseModel):
+    name: str
+    label: str
+    # 敏感内容：界面用密码框，提交的值只转给发起的插件，不进入任何记录
+    sensitive: bool = False
+    # 整串匹配的正则。表单只有这一个字段时，主人在聊天框里发来的符合格式的消息会被当作提交
+    pattern: str | None = None
+    placeholder: str = ""
+
+
+class InteractionRequest(BaseModel):
+    """请主人看一个东西（display）或填一个东西（form）。"""
+
+    kind: InteractionKind
+    title: str
+    message: str = ""
+    # 二维码内容，由界面在本地渲染
+    qr: str | None = None
+    url: str | None = None
+    fields: list[InteractionField] = Field(default_factory=list)
+    expires_in_s: float = 300.0
+
+
+class Interaction(BaseModel):
+    id: str
+    plugin: str
+    kind: InteractionKind
+    title: str
+    message: str = ""
+    qr: str | None = None
+    url: str | None = None
+    fields: list[InteractionField] = Field(default_factory=list)
+    status: InteractionStatus = "pending"
+    created_at: datetime
+    expires_at: datetime
+    updated_at: datetime
 
 
 class AuditRecord(BaseModel):
@@ -102,8 +146,49 @@ class PluginContext(Protocol):
         """最近的工具调用审计记录（需要 approve 权限）。"""
         ...
 
+    async def request_interaction(self, request: InteractionRequest) -> str:
+        """请主人扫码、填写等（需要 interact 权限），返回 ID。结果通过 on_interaction 通知。"""
+        ...
+
+    async def update_interaction(self, interaction_id: str, message: str) -> None:
+        """更新进度说明，例如"已扫码，请在手机上确认"（需要 interact 权限）。"""
+        ...
+
+    async def close_interaction(self, interaction_id: str, ok: bool, message: str = "") -> None:
+        """结束自己发起的交互请求（需要 interact 权限）。"""
+        ...
+
+    async def interactions(self) -> list[Interaction]:
+        """等主人处理的交互请求（需要 owner_ui 权限）。"""
+        ...
+
+    async def submit_interaction(self, interaction_id: str, values: dict[str, str]) -> None:
+        """提交主人填写的内容（需要 owner_ui 权限）。"""
+        ...
+
+    async def cancel_interaction(self, interaction_id: str) -> None:
+        """主人取消（需要 owner_ui 权限）。"""
+        ...
+
+    async def get_secret(self, name: str) -> str | None:
+        """读取自己的凭据（名字须在清单的 secrets 里）。"""
+        ...
+
+    async def set_secret(self, name: str, value: str) -> None:
+        """保存自己的凭据，例如登录后的 cookie。"""
+        ...
+
+    async def delete_secret(self, name: str) -> None: ...
+
 
 class Plugin(Protocol):
+    """插件接口。
+
+    发起交互请求的插件还应实现可选的
+    `async def on_interaction(self, interaction: Interaction, values: dict[str, str] | None)`：
+    主人提交表单时 values 是填写的内容，取消或过期时为 None。
+    """
+
     manifest: Manifest
 
     async def start(self, ctx: PluginContext) -> None: ...
@@ -125,6 +210,11 @@ __all__ = [
     "AuditRecord",
     "Capability",
     "EventIn",
+    "Interaction",
+    "InteractionField",
+    "InteractionKind",
+    "InteractionRequest",
+    "InteractionStatus",
     "Manifest",
     "Permission",
     "Plugin",

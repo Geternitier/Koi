@@ -12,6 +12,7 @@ from koi.kernel.approvals import APPROVAL_SOURCE, ApprovalError, ApprovalService
 from koi.kernel.bus import Priority, Trust
 from koi.kernel.plugins import PluginError, PluginHost, _Context
 from koi.kernel.process import PluginSpec, ProcessPlugin, load_specs
+from koi.kernel.secrets import Redactor
 from koi.kernel.store import Store
 from koi.persona.journal import Journal, JournalEntry
 from koi.plugins.web import WebPlugin
@@ -34,6 +35,9 @@ class FakeCtx:
         return {"name": "小鲤"}
 
     async def approvals(self) -> list[Approval]:
+        return []
+
+    async def interactions(self) -> list:
         return []
 
 
@@ -153,11 +157,11 @@ async def test_host_downgrades_trust_and_tags_source():
 async def test_host_audits_tool_calls_with_redaction():
     store = Store()
     host = PluginHost(
-        EventBus(), RealClock(), store=store, redact=lambda s: s.replace("sk-secret", "***")
+        EventBus(), RealClock(), store=store, redactor=Redactor({"llm": "secret-value"})
     )
     host.add(_Echo())
     await host.start()
-    assert (await host.call("echo", "say", {"key": "sk-secret"}))["ok"]
+    assert (await host.call("echo", "say", {"key": "secret-value"}))["ok"]
     with pytest.raises(ValueError):
         await host.call("echo", "boom", {})
     with pytest.raises(PluginError, match="超时"):
@@ -169,7 +173,7 @@ async def test_host_audits_tool_calls_with_redaction():
         ("boom", False),
         ("say", True),
     ]
-    assert "sk-secret" not in records[2].args + records[2].summary
+    assert "secret-value" not in records[2].args + records[2].summary
     assert "炸了" in records[1].summary
 
 

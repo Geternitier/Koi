@@ -95,6 +95,27 @@ AWAKE_MASK = Priority.P1
 SLEEP_MASK = Priority.P0
 
 
+def is_owner_action(event: Event) -> bool:
+    """主人在界面上做了什么：处理了审批，或提交、取消了交互请求。按主人呼叫来叫醒她。
+
+    插件自己发出的进度更新不算；来源必须是核心，插件伪造的同名事件也不算。
+    """
+    if not event.source.startswith(CORE_SOURCE_PREFIX):
+        return False
+    if event.type == "approval_resolved":
+        return True
+    return event.type == "interaction_update" and event.payload.get("owner_action") is True
+
+
+def reopens_tools(event: Event) -> bool:
+    """批准之后要由她重试，所以重新打开工具窗口。
+
+    交互请求由插件自己推进到底，主人提交后她只需等结果，不需要工具，
+    开着反而会让她在结果到来前重复调用。
+    """
+    return is_owner_action(event) and event.type == "approval_resolved"
+
+
 def _reply_route(event: Event) -> dict[str, Any]:
     return {k: event.payload[k] for k in REPLY_ROUTE_KEYS if k in event.payload}
 
@@ -286,7 +307,7 @@ class Persona:
     def _wake_reason(event: Event) -> WakeReason:
         if event.type == "alarm":
             return WakeReason.ALARM
-        if event.trust == Trust.OWNER or event.type == "approval_resolved":
+        if event.trust == Trust.OWNER or is_owner_action(event):
             return WakeReason.OWNER
         return WakeReason.DISTURBED
 
@@ -560,7 +581,7 @@ class Persona:
         if any(d.tier == "stop" for d in decisions):
             st.owner_task_until = None
         elif any(d.tier in ("eager", "reluctant") for d in decisions) or any(
-            e.type == "approval_resolved" for e in events
+            reopens_tools(e) for e in events
         ):
             st.owner_task_until = now + window
 

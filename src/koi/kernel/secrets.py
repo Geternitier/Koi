@@ -189,6 +189,13 @@ class Redactor:
     def from_store(cls, store: SecretStore) -> "Redactor":
         return cls(store.values())
 
+    def add(self, name: str, value: str, *, min_len: int = 8) -> None:
+        """运行中新出现的敏感值（插件凭据、主人填写的验证码等）。"""
+        if len(value) < min_len or any(v == value for v, _ in self._secrets):
+            return
+        self._secrets.append((value, name))
+        self._secrets.sort(key=lambda x: -len(x[0]))
+
     def __call__(self, text: str) -> str:
         for value, name in self._secrets:
             text = text.replace(value, f"[REDACTED:{name}]")

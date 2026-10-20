@@ -3,10 +3,23 @@
 import os
 from typing import Any
 
-from koi.protocol import Approval, ApprovalRequest, Capability, EventIn, Manifest, PluginContext
+from koi.protocol import (
+    Approval,
+    ApprovalRequest,
+    Capability,
+    EventIn,
+    Interaction,
+    InteractionField,
+    InteractionRequest,
+    Manifest,
+    PluginContext,
+)
 from koi.protocol.stdio import serve_stdio
 
-CAPS = ["echo", "emit", "state", "crash", "ask", "seen", "print", "env", "approvals", "hang"]
+CAPS = [
+    "echo", "emit", "state", "crash", "ask", "seen", "print", "env", "approvals", "hang",
+    "interact", "interactions_seen", "secret",
+]  # fmt: skip
 
 
 class Fixture:
@@ -22,6 +35,7 @@ class Fixture:
         self.ctx: PluginContext | None = None
         self.settings: dict[str, Any] = {}
         self.seen: list[dict[str, Any]] = []
+        self.interactions_seen: list[dict[str, Any]] = []
 
     def configure(self, settings: dict[str, Any]) -> None:
         self.settings = settings
@@ -34,6 +48,11 @@ class Fixture:
 
     async def on_approval(self, approval: Approval) -> None:
         self.seen.append(approval.model_dump(mode="json"))
+
+    async def on_interaction(self, interaction: Interaction, values: dict[str, str] | None) -> None:
+        self.interactions_seen.append(
+            {"id": interaction.id, "status": interaction.status, "values": values}
+        )
 
     async def call(self, capability: str, args: dict[str, Any]) -> dict[str, Any]:
         assert self.ctx is not None
@@ -59,6 +78,19 @@ class Fixture:
                 return {"value": os.environ.get("KOI_TEST_SECRET")}
             case "approvals":
                 return {"items": [a.model_dump(mode="json") for a in await self.ctx.approvals()]}
+            case "interact":
+                field = InteractionField(
+                    name="code", label="验证码", sensitive=True, pattern=r"\d{6}"
+                )
+                req = InteractionRequest(kind="form", title="测试登录", fields=[field])
+                interaction_id = await self.ctx.request_interaction(req)
+                await self.ctx.update_interaction(interaction_id, "验证码已发送")
+                return {"id": interaction_id}
+            case "interactions_seen":
+                return {"seen": self.interactions_seen}
+            case "secret":
+                await self.ctx.set_secret("token", str(args["value"]))
+                return {"value": await self.ctx.get_secret("token")}
             case "hang":
                 import asyncio
 

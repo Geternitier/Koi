@@ -20,6 +20,8 @@ from koi.protocol import (
     ApprovalRequest,
     AuditRecord,
     EventIn,
+    Interaction,
+    InteractionRequest,
     Plugin,
 )
 from koi.protocol.rpc import METHOD_NOT_FOUND, RpcError, RpcPeer
@@ -55,6 +57,40 @@ class RemoteContext:
     async def audit(self, limit: int = 50) -> list[AuditRecord]:
         rows = await self._peer.request("koi/audit", {"limit": limit})
         return [AuditRecord.model_validate(r) for r in rows]
+
+    async def request_interaction(self, request: InteractionRequest) -> str:
+        result = await self._peer.request("koi/interaction/request", request.model_dump())
+        return str(result["id"])
+
+    async def update_interaction(self, interaction_id: str, message: str) -> None:
+        await self._peer.request(
+            "koi/interaction/update", {"id": interaction_id, "message": message}
+        )
+
+    async def close_interaction(self, interaction_id: str, ok: bool, message: str = "") -> None:
+        await self._peer.request(
+            "koi/interaction/close", {"id": interaction_id, "ok": ok, "message": message}
+        )
+
+    async def interactions(self) -> list[Interaction]:
+        rows = await self._peer.request("koi/interactions")
+        return [Interaction.model_validate(r) for r in rows]
+
+    async def submit_interaction(self, interaction_id: str, values: dict[str, str]) -> None:
+        await self._peer.request("koi/interaction/submit", {"id": interaction_id, "values": values})
+
+    async def cancel_interaction(self, interaction_id: str) -> None:
+        await self._peer.request("koi/interaction/cancel", {"id": interaction_id})
+
+    async def get_secret(self, name: str) -> str | None:
+        result = await self._peer.request("koi/secret/get", {"name": name})
+        return result.get("value")
+
+    async def set_secret(self, name: str, value: str) -> None:
+        await self._peer.request("koi/secret/set", {"name": name, "value": value})
+
+    async def delete_secret(self, name: str) -> None:
+        await self._peer.request("koi/secret/delete", {"name": name})
 
 
 def serve_stdio(plugin: Plugin) -> None:
@@ -103,6 +139,12 @@ async def _serve(plugin: Plugin, stdin: BinaryIO, out: BinaryIO) -> None:
                 return await plugin.call(str(params["name"]), params.get("arguments") or {})
             case "koi/approval/resolved":
                 await plugin.on_approval(Approval.model_validate(params))
+                return None
+            case "koi/interaction/changed":
+                handler = getattr(plugin, "on_interaction", None)
+                if handler is not None:
+                    interaction = Interaction.model_validate(params["interaction"])
+                    await handler(interaction, params.get("values"))
                 return None
             case "koi/shutdown":
                 done.set()

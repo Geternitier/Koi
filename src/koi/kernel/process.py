@@ -21,6 +21,8 @@ from koi.protocol import (
     Approval,
     ApprovalRequest,
     EventIn,
+    Interaction,
+    InteractionRequest,
     Manifest,
     Permission,
     PluginContext,
@@ -40,6 +42,8 @@ class PluginSpec(BaseModel):
     entry: list[str] = Field(min_length=1)
     max_trust: TrustLevel = "external"
     permissions: list[Permission] = Field(default_factory=list)
+    # 插件可以读写的凭据名（系统钥匙串里的 plugin.<id>.<name>）
+    secrets: list[str] = Field(default_factory=list)
     settings: dict[str, Any] = Field(default_factory=dict)
     cwd: str | None = None
     enabled: bool = True
@@ -70,7 +74,11 @@ class ProcessPlugin:
     def __init__(self, spec: PluginSpec, *, env: dict[str, str] | None = None) -> None:
         self.spec = spec
         self.manifest = Manifest(
-            id=spec.id, version="", max_trust=spec.max_trust, permissions=spec.permissions
+            id=spec.id,
+            version="",
+            max_trust=spec.max_trust,
+            permissions=spec.permissions,
+            secrets=spec.secrets,
         )
         self.status: Status = "stopped"
         self.restarts = 0
@@ -122,6 +130,13 @@ class ProcessPlugin:
     async def on_approval(self, approval: Approval) -> None:
         if self._ready.is_set() and self._peer is not None:
             await self._peer.notify("koi/approval/resolved", approval.model_dump(mode="json"))
+
+    async def on_interaction(self, interaction: Interaction, values: dict[str, str] | None) -> None:
+        if self._ready.is_set() and self._peer is not None:
+            await self._peer.notify(
+                "koi/interaction/changed",
+                {"interaction": interaction.model_dump(mode="json"), "values": values},
+            )
 
     # ------------------------------------------------------------------ 监管
 
@@ -190,6 +205,7 @@ class ProcessPlugin:
                 "id": self.spec.id,
                 "max_trust": self.spec.max_trust,
                 "permissions": self.spec.permissions,
+                "secrets": self.spec.secrets,
             }
         )
         self.status = "running"
@@ -272,5 +288,33 @@ class ProcessPlugin:
             case "koi/audit":
                 records = await ctx.audit(int(params.get("limit", 50)))
                 return [r.model_dump(mode="json") for r in records]
+            case "koi/interaction/request":
+                req = InteractionRequest.model_validate(params)
+                return {"id": await ctx.request_interaction(req)}
+            case "koi/interaction/update":
+                await ctx.update_interaction(str(params["id"]), str(params.get("message", "")))
+                return {}
+            case "koi/interaction/close":
+                await ctx.close_interaction(
+                    str(params["id"]), bool(params["ok"]), str(params.get("message", ""))
+                )
+                return {}
+            case "koi/interactions":
+                return [a.model_dump(mode="json") for a in await ctx.interactions()]
+            case "koi/interaction/submit":
+                values = {str(k): str(v) for k, v in (params.get("values") or {}).items()}
+                await ctx.submit_interaction(str(params["id"]), values)
+                return {}
+            case "koi/interaction/cancel":
+                await ctx.cancel_interaction(str(params["id"]))
+                return {}
+            case "koi/secret/get":
+                return {"value": await ctx.get_secret(str(params["name"]))}
+            case "koi/secret/set":
+                await ctx.set_secret(str(params["name"]), str(params["value"]))
+                return {}
+            case "koi/secret/delete":
+                await ctx.delete_secret(str(params["name"]))
+                return {}
             case _:
                 raise RpcError(METHOD_NOT_FOUND, f"未知方法：{method}")

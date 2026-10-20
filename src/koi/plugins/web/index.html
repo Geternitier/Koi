@@ -37,6 +37,16 @@
   .approval .actions { display: flex; gap: 6px; margin-top: 6px; }
   .approval button { padding: 4px 12px; font-size: 13px; }
   .approval button.deny { background: #999; }
+  .interaction { border: 1px solid var(--owner); border-radius: 8px; padding: 8px; margin-top: 6px; font-size: 13px; }
+  .interaction .from { font-size: 11px; color: var(--muted); }
+  .interaction .title { font-weight: 600; }
+  .interaction .message { color: #555; white-space: pre-wrap; }
+  .interaction img { display: block; width: 100%; max-width: 200px; margin: 6px auto; background: #fff; padding: 4px; }
+  .interaction input { width: 100%; margin: 4px 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  .interaction .actions { display: flex; gap: 6px; margin-top: 6px; }
+  .interaction button { padding: 4px 12px; font-size: 13px; }
+  .interaction button.deny { background: #999; }
+  .interaction .expires { font-size: 11px; color: var(--muted); }
   details summary { cursor: pointer; }
   .audit { font-size: 12px; color: #555; margin-top: 4px; word-break: break-all; }
   .audit .fail { color: #c0392b; }
@@ -59,6 +69,7 @@
     <div class="bar"><div id="energy" style="width:0"></div></div></div>
   <div class="row"><span class="label">对你的感觉</span><div id="affinity">-</div></div>
   <div class="row" id="thought-row" hidden><span class="label">在想</span><div class="thought" id="thought"></div></div>
+  <div class="row" id="interactions-row" hidden><span class="label">等你处理</span><div id="interactions"></div></div>
   <div class="row" id="approvals-row" hidden><span class="label">等你批准</span><div id="approvals"></div></div>
   <details class="row" id="audit-box"><summary class="label">操作记录</summary><div id="audit"></div></details>
   <div class="meta" id="meta"></div>
@@ -165,6 +176,82 @@ async function refreshApprovals() {
   } catch (e) {}
 }
 
+// 按 ID 增量更新，避免定时刷新把正在填的输入框清空
+const cards = new Map();
+
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) {
+    let detail = r.status;
+    try { detail = (await r.json()).detail; } catch (e) {}
+    add({ role: "system", text: "处理失败：" + detail });
+  }
+  refreshInteractions();
+}
+
+function interactionCard(a) {
+  const box = el("div", null, "interaction");
+  box.appendChild(el("div", `来自 ${a.plugin} 插件`, "from"));
+  box.appendChild(el("div", a.title, "title"));
+  box.message = box.appendChild(el("div", a.message, "message"));
+  if (a.has_qr) {
+    const img = el("img");
+    img.src = `/api/interactions/${a.id}/qr.svg`;
+    img.alt = "二维码";
+    box.appendChild(img);
+  }
+  if (a.url && /^https?:\/\//i.test(a.url)) {
+    const link = el("a", "打开链接");
+    link.href = a.url; link.target = "_blank"; link.rel = "noopener noreferrer";
+    box.appendChild(link);
+  }
+  const inputs = {};
+  for (const f of a.fields) {
+    const input = el("input");
+    input.type = f.sensitive ? "password" : "text";
+    input.placeholder = f.placeholder || f.label;
+    input.autocomplete = "off";
+    if (f.pattern) input.pattern = f.pattern;
+    inputs[f.name] = input;
+    box.appendChild(input);
+  }
+  const actions = el("div", null, "actions");
+  if (a.kind === "form") {
+    const ok = el("button", "提交");
+    ok.onclick = () => {
+      const values = {};
+      for (const [k, v] of Object.entries(inputs)) values[k] = v.value;
+      post(`/api/interactions/${a.id}`, { values });
+    };
+    actions.appendChild(ok);
+  }
+  const cancel = el("button", "取消", "deny");
+  cancel.onclick = () => post(`/api/interactions/${a.id}/cancel`);
+  actions.appendChild(cancel);
+  box.appendChild(actions);
+  box.expires = box.appendChild(el("div", "", "expires"));
+  return box;
+}
+
+async function refreshInteractions() {
+  try {
+    const list = await (await fetch("/api/interactions")).json();
+    const container = document.getElementById("interactions");
+    const ids = new Set(list.map(a => a.id));
+    for (const [id, card] of cards) if (!ids.has(id)) { card.remove(); cards.delete(id); }
+    for (const a of list) {
+      let card = cards.get(a.id);
+      if (!card) { card = interactionCard(a); cards.set(a.id, card); container.appendChild(card); }
+      card.message.textContent = a.message;
+      const left = Math.max(0, Math.round((new Date(a.expires_at) - Date.now()) / 60000));
+      card.expires.textContent = left > 0 ? `${left} 分钟内有效` : "快过期了";
+    }
+    document.getElementById("interactions-row").hidden = list.length === 0;
+  } catch (e) {}
+}
+
 async function refreshAudit() {
   if (!document.getElementById("audit-box").open) return;
   try {
@@ -182,10 +269,14 @@ document.getElementById("audit-box").addEventListener("toggle", refreshAudit);
 
 (async () => {
   for (const m of await (await fetch("/api/history")).json()) add(m);
-  new EventSource("/api/stream").onmessage = e => { add(JSON.parse(e.data)); refreshApprovals(); };
+  new EventSource("/api/stream").onmessage = e => {
+    add(JSON.parse(e.data)); refreshApprovals(); refreshInteractions();
+  };
   refresh();
   refreshApprovals();
+  refreshInteractions();
   setInterval(() => { refresh(); refreshApprovals(); refreshAudit(); }, 5000);
+  setInterval(refreshInteractions, 2000);
 })();
 </script>
 </body>

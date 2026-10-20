@@ -14,6 +14,8 @@ from typing import Any
 from koi.kernel.approvals import ApprovalService
 from koi.kernel.bus import Event, EventBus, Priority, Trust
 from koi.kernel.clock import Clock
+from koi.kernel.interactions import InteractionService
+from koi.kernel.secrets import Redactor, SecretStore
 from koi.kernel.store import Store
 from koi.protocol import (
     Approval,
@@ -21,6 +23,8 @@ from koi.protocol import (
     AuditRecord,
     Capability,
     EventIn,
+    Interaction,
+    InteractionRequest,
     Manifest,
     Permission,
     Plugin,
@@ -82,6 +86,61 @@ class _Context:
         self._require("approve")
         return self._host.store.recent_audit(limit) if self._host.store else []
 
+    async def request_interaction(self, request: InteractionRequest) -> str:
+        self._require("interact")
+        return self._host._interactions_or_raise().request(self.plugin_id, request).id
+
+    async def update_interaction(self, interaction_id: str, message: str) -> None:
+        self._require("interact")
+        await self._host._interactions_or_raise().update(self.plugin_id, interaction_id, message)
+
+    async def close_interaction(self, interaction_id: str, ok: bool, message: str = "") -> None:
+        self._require("interact")
+        svc = self._host._interactions_or_raise()
+        await svc.close(self.plugin_id, interaction_id, ok, message)
+
+    async def interactions(self) -> list[Interaction]:
+        self._require("owner_ui")
+        return self._host._interactions_or_raise().pending()
+
+    async def submit_interaction(self, interaction_id: str, values: dict[str, str]) -> None:
+        self._require("owner_ui")
+        await self._host._interactions_or_raise().submit(interaction_id, values)
+
+    async def cancel_interaction(self, interaction_id: str) -> None:
+        self._require("owner_ui")
+        await self._host._interactions_or_raise().cancel(interaction_id)
+
+    def _secret_key(self, name: str) -> str:
+        if name not in self._manifest.secrets:
+            raise PermissionError(f"插件 {self.plugin_id} 没有登记凭据 {name}")
+        if self._host.secrets is None:
+            raise PluginError("凭据服务未启用")
+        return plugin_secret_name(self.plugin_id, name)
+
+    async def get_secret(self, name: str) -> str | None:
+        key = self._secret_key(name)
+        assert self._host.secrets is not None
+        value = self._host.secrets.get(key)
+        return value.get_secret_value() if value is not None else None
+
+    async def set_secret(self, name: str, value: str) -> None:
+        key = self._secret_key(name)
+        assert self._host.secrets is not None
+        self._host.secrets.set(key, value)
+        if self._host.redactor is not None:
+            self._host.redactor.add(key, value)
+        log.info("插件 %s 保存了凭据 %s", self.plugin_id, name)
+
+    async def delete_secret(self, name: str) -> None:
+        key = self._secret_key(name)
+        assert self._host.secrets is not None
+        self._host.secrets.delete(key)
+
+
+def plugin_secret_name(plugin_id: str, name: str) -> str:
+    return f"plugin.{plugin_id}.{name}"
+
 
 class PluginHost:
     def __init__(
@@ -90,25 +149,40 @@ class PluginHost:
         clock: Clock,
         *,
         approvals: ApprovalService | None = None,
+        interactions: InteractionService | None = None,
         store: Store | None = None,
-        redact: Callable[[str], str] | None = None,
+        secrets: SecretStore | None = None,
+        redactor: Redactor | None = None,
     ) -> None:
         self.bus = bus
         self.clock = clock
         self.approvals = approvals
+        self.interactions = interactions
         self.store = store
-        self._redact = redact or (lambda s: s)
+        self.secrets = secrets
+        self.redactor = redactor
+        self._redact: Callable[[str], str] = redactor or (lambda s: s)
         self._plugins: dict[str, Plugin] = {}
         self._state_provider: StateProvider = dict
         self._tasks: set[asyncio.Task[None]] = set()
         if approvals is not None:
             approvals.bind(self._on_approval)
+        if interactions is not None:
+            interactions.bind(self._on_interaction)
 
     def add(self, plugin: Plugin) -> None:
         pid = plugin.manifest.id
         if pid in self._plugins:
             raise PluginError(f"插件 ID 重复：{pid}")
         self._plugins[pid] = plugin
+        # 插件凭据从一开始就参与脱敏，不等插件读取
+        for name in plugin.manifest.secrets:
+            key = plugin_secret_name(pid, name)
+            if self.secrets is not None:
+                self.secrets.register(key)
+                value = self.secrets.get(key)
+                if value is not None and self.redactor is not None:
+                    self.redactor.add(key, value.get_secret_value())
 
     def set_state_provider(self, provider: StateProvider) -> None:
         self._state_provider = provider
@@ -174,6 +248,19 @@ class PluginHost:
         if self.approvals is None:
             raise PluginError("审批服务未启用")
         return self.approvals
+
+    def _interactions_or_raise(self) -> InteractionService:
+        if self.interactions is None:
+            raise PluginError("交互服务未启用")
+        return self.interactions
+
+    async def _on_interaction(
+        self, interaction: Interaction, values: dict[str, str] | None
+    ) -> None:
+        plugin = self._plugins.get(interaction.plugin)
+        handler = getattr(plugin, "on_interaction", None)
+        if handler is not None:
+            await handler(interaction, values)
 
     def _audit(
         self,

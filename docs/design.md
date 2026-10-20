@@ -568,6 +568,10 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 | | `koi/state` | 读取状态快照 |
 | | `koi/approval/request` | 发起审批，立即返回审批 ID |
 | | `koi/approvals`、`koi/approval/resolve`、`koi/audit` | 需要 `approve` 权限（目前只有 Web 插件有） |
+| | `koi/interaction/request`、`update`、`close` | 请主人扫码、填写（需要 `interact` 权限），见下文"交互请求" |
+| | `koi/interactions`、`koi/interaction/submit`、`cancel` | 展示和提交交互请求（需要 `owner_ui` 权限，目前只有 Web 插件有） |
+| | `koi/secret/get`、`set`、`delete` | 读写自己的凭据（名字须在核心侧配置的 `secrets` 里） |
+| 核心 → 插件 | `koi/interaction/changed`（通知） | 交互请求有了结果：主人填写的值、取消或过期 |
 
 **监管**（`koi.kernel.process.ProcessPlugin`）：
 
@@ -619,6 +623,28 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
   - **提到黑名单路径**的命令直接拒绝。
 
 尚未实现：核心数据目录的哈希校验和 git 版本化（§3.4 第 5 点）、授权期限（单次 / 本次唤醒 / 永久）的细分、MCP 服务器适配器。
+
+**交互请求**（`koi.kernel.interactions.InteractionService`）：插件请主人扫码、填手机号或验证码，用于登录 B站、聊天软件等。约定见 [plugin-spec.md](plugin-spec.md) §8.2。
+
+- **两种请求**：
+  - `display`：展示二维码（由 Web 用 `qrcode` 在本地渲染成 SVG）、http(s) 链接或说明；
+  - `form`：一组字段，可标 `sensitive`、可带整串匹配的 `pattern`。
+- **敏感值隔离**：主人填写的值只转给发起的插件，核心不保存，敏感值同时加入 `Redactor`。她只收到 `interaction_update` 事件，事件文字由核心生成，不含填写的值。测试断言了手机号、验证码、cookie 不出现在任何事件、日志、审计记录里。
+- **截获聊天回复**：表单只有一个带 `pattern` 的字段时，主人在 Web 聊天框里发来的符合格式的消息被截获为提交。消息记录里只显示圆点，不作为 `owner_message` 发给她。
+- **主人呼叫与工具窗口**：
+  - 主人的提交和取消（P0）按主人呼叫叫醒她（`is_owner_action`），插件的进度和结果（P1）、过期（P2）不算。
+  - 只有审批结果会重新打开工具窗口（`reopens_tools`），因为批准后要由她重试。交互请求由插件推进到底，不重新打开工具窗口。
+  - 实测中，开着工具窗口会让她在结果到来前把 `login` 连续调用了 6 次，所以改成了现在这样。
+  - 两个判断都要求事件来源是 `core.`，插件伪造的同名事件不算。
+- **防重复**：同一插件、同一标题、还在等主人的请求会合并；插件规范要求 `login` 在进行中时幂等；她的提示词里也写明"请主人扫码或填写后，在收到结果前不要再调用同一个工具"。
+- **限制**：有效期 30 秒到 30 分钟，每个插件最多 3 个未结束的请求；只能更新、结束自己发起的请求。
+- **和审批的关系**：审批仍是独立的服务。两者语义不同：审批批准后由她重试，交互请求由插件自己推进到底。Web 侧栏里并列显示"等你处理"和"等你批准"。
+
+**插件凭据**：
+
+- **登记**：核心侧配置 `secrets: [cookie]` 登记凭据名。插件通过 `get_secret` / `set_secret` 读写，核心存进系统钥匙串的 `plugin.<id>.<name>`。
+- **脱敏**：插件加入宿主时，已有的凭据就加入脱敏；新保存的凭据也立即加入。
+- **隔离**：插件读写没有登记的名字会被拒绝，所以拿不到别的插件或 LLM 的凭据。
 
 ### 6.10 人格体实例（`koi.kernel.instance`、`koi.persona.templates`）
 
@@ -716,7 +742,7 @@ koi list                              # 本机所有实例及是否在运行
 2. **核心最小闭环**：人格设定、作息状态机、心情动力学、意愿机制、经历记录，加一个 Web 对话插件。用加速时钟跑一周的模拟，调参。（已完成，见 §6.7、§6.8；接入 LLM 后的作息调参待做）
 3. **记忆巩固**：日记、笔记本、激活规则、缓存友好的 prompt 排布。（已完成，见 §5.5；人物档案和 git 版本化待做）
 4. **插件协议定型**：manifest、中断优先级、信任标记、插件监管，然后接入 Harness。（已完成，见 §6.9；数据目录完整性校验和 MCP 适配待做）
-5. **扩展插件**：桌面形象、B站、聊天软件，同时补上人物档案。社交类插件的约定见 [plugin-spec.md](plugin-spec.md)。
+5. **扩展插件**：桌面形象、B站、聊天软件，同时补上人物档案。社交类插件的约定见 [plugin-spec.md](plugin-spec.md)，QQ 的接入设计见 [plugin-qq.md](plugin-qq.md)。
 
 ---
 

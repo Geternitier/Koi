@@ -31,6 +31,7 @@ from koi.kernel.instance import (
     load_instance,
     pick_port,
 )
+from koi.kernel.interactions import InteractionService
 from koi.kernel.llm import LLMConfig, LLMGateway
 from koi.kernel.paths import KoiPaths
 from koi.kernel.plugins import PluginHost
@@ -229,7 +230,18 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
     scheduler = Scheduler(clock, on_error=lambda e: log.error("调度回调失败", exc_info=e))
     bus = EventBus()
     approvals = ApprovalService(bus, clock)
-    host = PluginHost(bus, clock, approvals=approvals, store=store, redact=redactor)
+    interactions = InteractionService(
+        bus, clock, on_sensitive=lambda name, value: redactor.add(name, value, min_len=4)
+    )
+    host = PluginHost(
+        bus,
+        clock,
+        approvals=approvals,
+        interactions=interactions,
+        store=store,
+        secrets=secrets,
+        redactor=redactor,
+    )
     host.add(WebPlugin(port=port))
     env = scrubbed_env(secrets)
     specs = load_specs(paths.plugins)
@@ -287,6 +299,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
                 pid: getattr(host.get(pid), "status", "running") for pid in host.plugin_ids
             },
             "pending_approvals": len(approvals.pending()),
+            "pending_interactions": len(interactions.pending()),
         }
 
     host.set_state_provider(state)
