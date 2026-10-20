@@ -3,7 +3,7 @@
 > 版本：草案 0.1，对应插件协议 `koi/0.1`
 > 适用范围：把外部平台的人和内容接进来、把她说的话发出去的插件，例如 B站、QQ、Telegram、Discord、飞书、企业微信。
 > 协议本身（JSON-RPC 方法、监管、审批）见 [设计文档](design.md) §6.9；本文只规定社交类插件在协议之上必须遵守的约定。
-> QQ 的具体接入设计见 [QQ 插件设计](plugin-qq.md)。
+> QQ、B站等具体平台的接入设计随各自的插件仓库维护，不在本仓库。
 
 文中"必须"是硬性要求，"应当"是强烈建议（不遵守要有理由），"可以"是可选项。标注"（规划）"的内容核心尚未实现，插件不要依赖。
 
@@ -35,6 +35,7 @@
 ## 2. 运行形态
 
 - **必须**是进程外插件：只依赖 `koi.protocol`，入口调用 `serve_stdio(plugin)`，不得导入 `koi.kernel`、`koi.persona`、`koi.app`。
+- **应当**在独立仓库开发，用自己的虚拟环境运行，见 §10。
 - **必须**实现 `Plugin` 接口：`manifest`、`start(ctx)`、`stop()`、`call(capability, args)`、`on_approval(approval)`。需要配置的插件实现 `configure(settings)`，它在 `start` 之前被调用。
 - **启动和退出**：
   - **必须**在 30 秒内完成 `initialize`（`configure` + `start`）。登录、建立长连接这类耗时操作放进后台任务，不要阻塞 `start`。
@@ -54,7 +55,7 @@
 
 ```yaml
 id: qq
-entry: [python, -m, koi_qq]
+entry: [koi-plugin-qq]      # 启动命令，写法见 §10.2
 max_trust: owner            # 这个插件能上报的最高信任级别
 settings:                   # initialize 时原样传给插件的 configure()
   owner:
@@ -305,7 +306,7 @@ settings:                   # initialize 时原样传给插件的 configure()
 ```yaml
 # data/plugins/bilibili/manifest.yaml
 id: bilibili
-entry: [python, -m, koi_bilibili]
+entry: [koi-plugin-bilibili]
 max_trust: owner
 permissions: [interact]   # 需要请主人扫码、填验证码
 secrets: [cookie]
@@ -383,11 +384,73 @@ secrets: [cookie]
 
 ---
 
-## 10. 验收清单
+## 10. 外部插件的开发与挂载
+
+平台插件不放在 Koi 仓库里，各自一个仓库，例如 `koi-plugin-bilibili`。这样平台接口变动、风控、下架只影响那个插件，依赖的许可证也和核心分开（§10.3）。
+
+### 10.1 插件仓库
+
+- **依赖**：把 `koi` 作为依赖，只导入 `koi.protocol`（它只依赖 pydantic）。开发期用 uv 指向本地的 Koi 源码：
+
+  ```toml
+  [project]
+  name = "koi-plugin-bilibili"
+  license = "GPL-3.0-or-later"        # 按插件自己的依赖选，见 §10.3
+  dependencies = ["koi", "bilibili-api-python"]
+
+  [project.scripts]
+  koi-plugin-bilibili = "koi_bilibili.__main__:main"
+
+  [tool.uv.sources]
+  koi = { path = "../Koi", editable = true }
+  ```
+
+- **入口**：`koi_bilibili/__main__.py` 里的 `main()` 调用 `serve_stdio(BilibiliPlugin())`。
+- **不放真实配置**：主人 ID、凭据、信任上限都只写在实例的 `manifest.yaml` 和系统钥匙串里，插件仓库里只放示例。
+- **协议版本**：在插件的说明文档里写明适配的协议版本（`koi.protocol.PROTOCOL_VERSION`，当前 `koi/0.1`）和兼容的 Koi 版本。
+
+### 10.2 挂载到实例
+
+1. 在插件仓库里运行 `uv sync`，生成插件自己的 `.venv`。
+2. 在实例的 `data/plugins/<id>/manifest.yaml` 里登记（§3），`entry` 按阶段选一种：
+
+   | 阶段 | `entry` |
+   |---|---|
+   | 开发 | `["D:/Develop/koi-plugin-bilibili/.venv/Scripts/python.exe", "-m", "koi_bilibili"]`（macOS 是 `.venv/bin/python`） |
+   | 安装后 | 先 `uv tool install koi-plugin-bilibili`（或 `uv tool install --editable <仓库路径>`），然后写 `[koi-plugin-bilibili]` |
+
+3. 重启 `koi run`。插件只在启动时加载，日志记在 `koi.plugin.<id>` 下。
+
+**注意**：
+
+- **不得**写成 `[python, -m, ...]`：那会用到 `PATH` 上随便哪个 Python，通常装不全插件的依赖。每个插件用自己的虚拟环境，依赖互不干扰。
+- **不要**用 `uv run --project ...` 当入口：首次启动要先同步依赖，可能超过 30 秒的初始化时限。
+- 插件进程的环境变量已去掉 Koi 的凭据，`PATH` 保留；工作目录默认是 `data/plugins/<id>/`，可用 `cwd` 改。
+
+### 10.3 依赖的许可证
+
+Koi 核心是 MIT。插件是独立进程，通过 stdio 上的 JSON-RPC 和核心通信，插件依赖的许可证不影响核心；但插件**自己**要和它的依赖兼容。
+
+| 依赖的许可证 | 要求 |
+|---|---|
+| MIT、BSD、Apache-2.0 等宽松许可证 | 无特别要求 |
+| LGPL | 可以作为依赖使用；修改了它的源码要按 LGPL 公开 |
+| GPL（如 bilibili-api-python 是 GPLv3+） | 插件整体**必须**用 GPL 兼容的许可证发布，例如 GPL-3.0-or-later |
+| AGPL | 同 GPL；插件对外提供网络服务时还要公开源码 |
+| 没有许可证、禁止商用或自定义限制 | **不应**使用；只自用、不分发时自行承担风险 |
+
+- **必须**在插件仓库放 `LICENSE`，并在 `pyproject.toml` 写 `license`。
+- **不得**把 GPL 等强 copyleft 的依赖或从中复制的代码放进 Koi 仓库，也不得加进核心的依赖（包括 optional extras）。
+- **应当**在 CI 里检查依赖许可证，例如 `pip-licenses --fail-on="..."`。
+- 许可证之外，非官方接口还有平台规则和封号风险，见 §9。
+
+---
+
+## 11. 验收清单
 
 提交一个社交类插件前逐条确认：
 
-- [ ] 只依赖 `koi.protocol`，`lint-imports` 通过
+- [ ] 只导入 `koi.protocol`，有独立的虚拟环境和 `LICENSE`，许可证和依赖兼容（§10）
 - [ ] 30 秒内完成初始化，`koi/shutdown` 后 5 秒内退出，不阻塞事件循环
 - [ ] 主人识别只用不可变 ID，并有单元测试（同名陌生人、自称主人、真主人）
 - [ ] 未配置主人时不产生任何 `owner` 事件

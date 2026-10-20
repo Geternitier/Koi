@@ -8,6 +8,9 @@ dist/
 build/
 *.egg-info/
 sim/out/
+docs/*
+!docs/design.md
+!docs/plugin-spec.md
 .env
 .env.*
 *.log
