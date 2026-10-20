@@ -1,0 +1,76 @@
+[project]
+name = "koi"
+version = "0.1.0"
+description = "人格体 Agent"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.150.0",
+    "keyring>=25.7.0",
+    "openai>=1.40",
+    "platformdirs>=4.2",
+    "pydantic>=2.8",
+    "pyyaml>=6.0",
+    "send2trash>=2.1.0",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+koi = "koi.app:main"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.15",
+    "import-linter>=2.1",
+    "matplotlib>=3.9",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/koi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文文本中的全角标点
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# 提示词正文按行书写，不折行
+"src/koi/persona/prompt.py" = ["E501"]
+
+[tool.pyright]
+include = ["src", "tests", "sim"]
+pythonVersion = "3.12"
+
+[tool.importlinter]
+root_package = "koi"
+
+[[tool.importlinter.contracts]]
+name = "分层：组装根 > 人格体 > 内核 > 插件协议"
+type = "layers"
+layers = ["koi.app", "koi.persona", "koi.kernel", "koi.protocol"]
+
+[[tool.importlinter.contracts]]
+name = "插件只能依赖插件协议"
+type = "forbidden"
+source_modules = ["koi.plugins"]
+forbidden_modules = ["koi.app", "koi.persona", "koi.kernel"]
+
+[[tool.importlinter.contracts]]
+name = "核心不依赖具体插件"
+type = "forbidden"
+source_modules = ["koi.persona", "koi.kernel", "koi.protocol"]
+forbidden_modules = ["koi.plugins"]

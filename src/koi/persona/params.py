@@ -1,0 +1,163 @@
+"""人格参数（设定的数值部分）。只能由配置服务修改，运行时只读。"""
+
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class _Params(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class SleepParams(_Params):
+    # 睡眠双过程模型
+    tau_wake_h: float = 18.2
+    tau_sleep_h: float = 4.2
+    upper_base: float = 0.60
+    lower_base: float = 0.17
+    circadian_amplitude: float = 0.12
+    circadian_peak_hour: float = 17.0
+    # 超过入睡阈值后还能硬撑的余量，耗尽即精力归零
+    stay_up_margin: float = 0.15
+    # 活动疲劳的恢复时间常数
+    fatigue_tau_awake_h: float = 4.0
+    fatigue_tau_sleep_h: float = 1.5
+    # 睡眠中自醒：基础速率 + 临近自然醒时的附加速率
+    self_wake_rate_per_h: float = 0.015
+    near_wake_rate_per_h: float = 0.6
+    near_wake_scale: float = 0.03
+    # P1 事件在睡眠中吵醒的概率
+    disturb_wake_prob: float = 0.05
+    # 提前醒来后，睡眠压力仍高于下阈值这么多就能睡回笼觉
+    resume_margin: float = 0.05
+    resume_delay_min: float = 15.0
+    # 被叫醒时的起床气 [0, 1]，按入睡时长的睡眠惯性放大
+    grumpiness: float = 0.5
+    sleep_inertia_min: float = 20.0
+    # 作息随实际行为漂移
+    phase_adapt_rate: float = 0.1
+    phase_max_shift_h: float = 1.0
+    phase_anchor_rate: float = 0.1
+
+
+class AffectParams(_Params):
+    baseline_valence: float = 0.15
+    baseline_arousal: float = 0.0
+    theta_emotion_per_h: float = 0.8
+    theta_mood_per_h: float = 0.05
+    mood_coupling_per_h: float = 0.15
+    noise: float = 0.05
+    sensitivity_positive: float = 1.0
+    sensitivity_negative: float = 1.0
+    sensitivity_arousal: float = 0.8
+    energy_valence_coupling: float = 0.15
+    energy_arousal_coupling: float = 0.3
+    sleep_arousal_drop: float = 0.3
+    calm_threshold: float = 0.12
+
+
+class WakeParams(_Params):
+    base_interval_min: float = 90.0
+    min_interval_min: float = 5.0
+    max_interval_min: float = 240.0
+    heat_alpha: float = 2.0
+    heat_half_life_min: float = 20.0
+    heat_owner: float = 1.0
+    heat_known: float = 0.5
+    heat_max: float = 3.0
+    # 距上次交互超过这么久才视为"没有活跃交互"，可以入睡
+    sleep_quiet_min: float = 15.0
+    max_backoff: int = 3
+    jitter_low: float = 0.6
+    jitter_high: float = 1.4
+
+
+class WillParams(_Params):
+    # 意愿度 W = base - 厌恶 + 心情 + 精力 - 烦躁 + 好感
+    base: float = 0.35
+    aversion_like: float = -0.2
+    aversion_neutral: float = 0.0
+    aversion_dislike: float = 0.3
+    aversion_hate: float = 0.6
+    coef_valence: float = 0.4
+    coef_energy: float = 0.3
+    coef_irritation: float = 0.4
+    coef_affinity: float = 0.3
+    # 分档：W >= high 爽快；low <= W < high 讨价还价；W < low 拒绝
+    tau_high: float = 0.3
+    tau_low: float = 0.0
+    # 坚持压力
+    pressure_normal: float = 1.0
+    pressure_strong: float = 2.0
+    pressure_half_life_h: float = 2.0
+    # 连续追问（间隔不超过此值）时压力不衰减
+    pressure_grace_min: float = 15.0
+    stubbornness: float = 3.0
+    # 心情越差越固执：P_max = stubbornness * (1 + mood_stubbornness * max(0, -v))
+    mood_stubbornness: float = 0.5
+    # 强烈要求达到这么多次必须照做（硬保证）
+    strong_insist_limit: int = Field(default=2, ge=1, le=3)
+    ledger_ttl_h: float = 24.0
+    # 不情愿照做的代价
+    reluctant_valence_impulse: float = -0.15
+    reluctant_affinity_drop: float = 0.05
+    # 对主人的好感 [-1, 1]
+    affinity_baseline: float = 0.5
+    affinity_half_life_h: float = 72.0
+    affinity_gain: float = 0.02
+    affinity_loss: float = 0.04
+
+
+class MindParams(_Params):
+    model: str | None = None
+    perceive_temperature: float = 0.3
+    act_temperature: float = 1.0
+    journal_entries: int = 80
+    show_thoughts: bool = True
+    proactive_min_interval_h: float = 2.0
+    consolidate_temperature: float = 0.7
+    # 答应主人的事之后这么久内可以用工具（审批结果也会延长）
+    owner_task_window_min: float = 30.0
+    max_tool_rounds: int = 6
+    max_tool_calls_per_round: int = 3
+    tool_result_chars: int = 6000
+    # LLM 调用折算为活动疲劳
+    energy_per_call: float = 0.4
+    energy_per_1k_output: float = 1.0
+    energy_per_1k_uncached_prompt: float = 0.2
+
+
+class MemoryParams(_Params):
+    # 近期日记全部激活
+    recent_days: int = 30
+    # 更早的日记只注入摘要（重要日记除外）
+    summary_only_after_days: int = 90
+    # 远期日记每天抽样篇数，权重 age^-d * (1+recall)^beta * mood_peak^gamma
+    sample_k: int = 3
+    forget_exponent: float = 1.0
+    recall_exponent: float = 1.0
+    mood_exponent: float = 1.0
+    mood_floor: float = 0.1
+    important_per_month: int = 3
+    # 一天里有效经历少于这么多条就不写日记
+    min_entries: int = 4
+    notebook_refine_days: float = 7.0
+    # 对话激活每次最多想起几篇
+    recall_limit: int = 2
+    # 记忆巩固后，prompt 里仍保留的最近经历条数
+    journal_min_entries: int = 12
+
+
+class PersonaParams(_Params):
+    sleep: SleepParams = Field(default_factory=SleepParams)
+    affect: AffectParams = Field(default_factory=AffectParams)
+    wake: WakeParams = Field(default_factory=WakeParams)
+    will: WillParams = Field(default_factory=WillParams)
+    mind: MindParams = Field(default_factory=MindParams)
+    memory: MemoryParams = Field(default_factory=MemoryParams)
+
+
+def load_params(path: Path) -> PersonaParams:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return PersonaParams.model_validate(data)
