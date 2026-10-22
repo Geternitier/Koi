@@ -202,7 +202,7 @@ async def test_harness_protects_every_registered_instance(tmp_path, registry):
 
 def test_templates():
     available = list_templates()
-    assert DEFAULT_TEMPLATE in available and available[DEFAULT_TEMPLATE].name == "小鲤"
+    assert DEFAULT_TEMPLATE in available and available[DEFAULT_TEMPLATE].name == "林小柚"
     renamed = rename("---\nname: 小鲤\nowner_call: 主人\n---\n小鲤喜欢奶茶。", "雪")
     assert renamed.startswith("---\nname: 雪\nowner_call: 主人\n---\n雪喜欢奶茶。")
     assert rename("没有 front-matter", "雪").startswith("---\nname: 雪\n---\n没有")

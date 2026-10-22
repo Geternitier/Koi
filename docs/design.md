@@ -662,7 +662,7 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 一个进程承载一个人格体。实例可以建在任意目录，人设从模板复制进去，之后和模板互不影响。
 
 ```
-koi templates                         # 内置人设模板（目前只有 xiaoli，即小鲤）
+koi templates                         # 内置人设模板（目前只有 xiaoli，即林小柚）
 koi init D:\Personas\雪 --name 雪      # 用默认模板建实例，并改名
 koi init . --from D:\my\profile.md    # 用自己的人设（文件，或含 profile.md / params.yaml 的目录）
 koi run                               # 从当前目录往上找 koi.yaml；找不到时用默认实例

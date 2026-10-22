@@ -55,7 +55,7 @@ Koi 是一个住在你电脑里的人格体 Agent。她有自己的作息、精�
 koi run
 ```
 
-然后打开 http://127.0.0.1:8765 跟她聊天。在没有实例配置的目录里运行时，启动的是默认的人格体"小鲤"：数据在平台数据目录（Windows `%LOCALAPPDATA%\Koi`，macOS `~/Library/Application Support/Koi`），工作区在"文档/KoiWorkspace"。
+然后打开 http://127.0.0.1:8765 跟她聊天。在没有实例配置的目录里运行时，启动的是默认的人格体"林小柚"：数据在平台数据目录（Windows `%LOCALAPPDATA%\Koi`，macOS `~/Library/Application Support/Koi`），工作区在"文档/KoiWorkspace"。
 
 网页侧栏的内容：
 
@@ -82,7 +82,7 @@ koi list                                # 本机所有人格体，以及是否�
 
 | 选项 | 作用 |
 |---|---|
-| `--template NAME` | 用内置模板，默认 `xiaoli`（小鲤） |
+| `--template NAME` | 用内置模板，默认 `xiaoli`（林小柚） |
 | `--from PATH` | 用自己的人设：`profile.md` 文件，或包含 `profile.md`（以及可选的 `params.yaml`）的目录 |
 | `--name NAME` | 给她起名，覆盖人设里的名字 |
 | `--port N` | Web 端口，默认自动挑一个空闲的（8765 留给默认实例） |
@@ -123,8 +123,8 @@ koi list                                # 本机所有人格体，以及是否�
 
 ```markdown
 ---
-name: 小鲤
-owner_call: 主人
+name: 林小柚
+owner_call: 哥哥
 ---
 ## 性格
 - 清纯、温柔、甜……
