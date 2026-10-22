@@ -20,6 +20,7 @@ from koi.persona.mind import (
     WakeOutcome,
 )
 from koi.persona.params import PersonaParams, load_params
+from koi.persona.people import People, PersonBrief, PersonCard, PersonUpdate, Relation
 from koi.persona.profile import PersonaProfile, load_profile
 from koi.persona.state import PersonaState, Snapshot, Status, WakeReason
 from koi.persona.will import RequestAssessment, WillDecision
@@ -39,11 +40,16 @@ __all__ = [
     "Memory",
     "MemoryView",
     "Mind",
+    "People",
     "Perception",
+    "PersonBrief",
+    "PersonCard",
+    "PersonUpdate",
     "Persona",
     "PersonaParams",
     "PersonaProfile",
     "PersonaState",
+    "Relation",
     "Reply",
     "RequestAssessment",
     "Snapshot",

@@ -47,6 +47,7 @@ from koi.kernel.secrets import (
 from koi.persona import (
     Journal,
     Memory,
+    People,
     Persona,
     PersonaState,
     ToolSpec,
@@ -288,6 +289,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         actuator=host.call,
         tools=toolbox,
         owner_call=profile.owner_call,
+        people=People(paths.memory / "people", owner_call=profile.owner_call),
     )
 
     def _iso(value: datetime | None) -> str | None:

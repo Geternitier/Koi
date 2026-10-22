@@ -1,12 +1,13 @@
 """人格体运行状态。只能由核心自身写入。"""
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 from koi.persona.affect import AffectState
 from koi.persona.memory import MemoryState
+from koi.persona.people import Relation
 from koi.persona.will import WillEntry
 
 
@@ -54,9 +55,14 @@ class PersonaState(BaseModel):
     interrupted_sleep: bool = False
     episodes: list[SleepEpisode] = Field(default_factory=list)
     alarms: dict[str, Alarm] = Field(default_factory=dict)
-    # 与主人的关系
+    # 与主人的关系：近期好感回到长期感情；长期感情为 None 时从 affinity_baseline 起步
     owner_affinity: float = 0.5
+    owner_bond: float | None = None
     last_owner_at: datetime | None = None
+    # 与其他人的关系，键是人物档案 ID
+    people: dict[str, Relation] = Field(default_factory=dict)
+    # 长期感情上次沉淀的日子，每天只沉淀一次
+    bonds_settled_on: date | None = None
     # 主人最近使用的渠道（插件 ID），主动找主人时走这里
     owner_channel: str | None = None
     last_proactive_at: datetime | None = None
@@ -85,5 +91,6 @@ class Snapshot(BaseModel):
     backoff: int
     circadian_peak_hour: float
     owner_affinity: float
+    owner_bond: float
     last_owner_at: datetime | None
     pending_events: int

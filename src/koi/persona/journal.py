@@ -17,6 +17,8 @@ class JournalEntry(BaseModel):
     kind: EntryKind
     who: str = ""
     text: str
+    # 打交道的人（人物档案 ID）：收到谁的消息、回复了谁
+    person: str | None = None
 
 
 class Journal:
