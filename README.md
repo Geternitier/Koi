@@ -208,6 +208,7 @@ src/koi/
 sim/                离散事件模拟
 tests/
 docs/design.md      设计文档
+docs/design/        Web 界面改版提案（HTML + 可交互原型）
 ```
 
 ### 编写插件

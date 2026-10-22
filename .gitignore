@@ -11,6 +11,8 @@ sim/out/
 docs/*
 !docs/design.md
 !docs/plugin-spec.md
+!docs/design/
+!docs/design/**
 .env
 .env.*
 *.log
