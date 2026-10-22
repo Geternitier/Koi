@@ -73,10 +73,10 @@ def type_order(event: Event) -> int:
 
 
 def difficulty(event: Event) -> float:
-    """处理起来大概多费劲：正文每 200 字算 1，带画面加 3，带链接加 1。"""
+    """处理起来大概多费劲：正文每 200 字算 1，带图片/画面加 3，带链接加 1。"""
     text = event.payload.get("text")
     score = len(text) / 200 if isinstance(text, str) else 0.0
-    if event.payload.get("frames"):
+    if event.payload.get("frames") or event.payload.get("images"):
         score += 3
     if isinstance(text, str) and ("http://" in text or "https://" in text):
         score += 1

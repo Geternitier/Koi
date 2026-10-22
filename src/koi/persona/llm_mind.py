@@ -1,6 +1,7 @@
 """LLM 驱动的 Mind。"""
 
 import base64
+import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any, Protocol, TypeVar
@@ -34,6 +35,15 @@ from koi.persona.prompt import (
 from koi.persona.will import RequestAssessment, WillDecision
 
 T = TypeVar("T", bound=BaseModel)
+# 这些状态码通常意味着模型不接受图片，而不是网络或鉴权问题
+IMAGE_REJECTED_STATUS = frozenset({400, 413, 415, 422})
+
+log = logging.getLogger(__name__)
+
+
+def _image_rejected(error: Exception) -> bool:
+    status = getattr(error, "status_code", None)
+    return isinstance(status, int) and status in IMAGE_REJECTED_STATUS
 
 
 class JsonLLM(Protocol):
@@ -100,6 +110,8 @@ class LLMMind:
         self.calm_threshold = calm_threshold
         self._redact = redact or (lambda s: s)
         self._system = system_prompt(profile)
+        # 模型明确拒绝过图片后，这个进程不再附图，省得每次多一次失败的调用
+        self._vision_off = False
 
     def _messages(self, user: str, images: list[SeenImage] | None = None) -> list[dict[str, Any]]:
         text = self._redact(user)
@@ -129,6 +141,28 @@ class LLMMind:
             + usage.cache_miss_tokens / 1000 * p.energy_per_1k_uncached_prompt
         )
 
+    async def _act(
+        self, ctx: WakeContext, decisions: list[WillDecision]
+    ) -> tuple[ActOutput, Usage]:
+        # 有图时用视觉模型；没配就和主模型相同
+        vision = bool(ctx.images and self.params.vision_model)
+        model = self.params.vision_model if vision else self.params.model
+        return await self.llm.chat_json(
+            self._messages(
+                act_prompt(
+                    ctx,
+                    decisions,
+                    self.profile,
+                    self.calm_threshold,
+                    max_tool_calls=self.params.max_tool_calls_per_round,
+                ),
+                ctx.images,
+            ),
+            ActOutput,
+            model=model,
+            temperature=self.params.act_temperature,
+        )
+
     async def perceive(self, ctx: WakeContext) -> Perception:
         if not ctx.events:
             return Perception()
@@ -146,21 +180,18 @@ class LLMMind:
         )
 
     async def act(self, ctx: WakeContext, decisions: list[WillDecision]) -> WakeOutcome:
-        out, usage = await self.llm.chat_json(
-            self._messages(
-                act_prompt(
-                    ctx,
-                    decisions,
-                    self.profile,
-                    self.calm_threshold,
-                    max_tool_calls=self.params.max_tool_calls_per_round,
-                ),
-                ctx.images,
-            ),
-            ActOutput,
-            model=self.params.model,
-            temperature=self.params.act_temperature,
-        )
+        effective = ctx
+        if self._vision_off and ctx.images:
+            effective = ctx.model_copy(update={"images": [], "images_unavailable": True})
+        try:
+            out, usage = await self._act(effective, decisions)
+        except Exception as e:
+            if not effective.images or not _image_rejected(e):
+                raise
+            log.warning("模型不接受图片，这次改成纯文本：%s", e)
+            self._vision_off = True
+            effective = ctx.model_copy(update={"images": [], "images_unavailable": True})
+            out, usage = await self._act(effective, decisions)
         alarms: list[AlarmRequest] = []
         if out.alarm is not None:
             at = out.alarm.at

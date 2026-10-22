@@ -159,6 +159,15 @@
 .k-msg.owner .k-bubble { border: 0; border-radius: 14px 3px 14px 14px; background: var(--k-water); color: #fff; box-shadow: 0 8px 20px -18px rgba(29,74,70,.9); }
 .koi-app[data-theme="night"] .k-msg.owner .k-bubble { color: #0F191A; }
 .k-msg.owner .k-bubble code { background: rgba(255,255,255,.15); border-color: transparent; color: inherit; }
+/* 聊天里的图片 */
+.k-msg-images { display: grid; gap: 3px; grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(100%, 308px); margin-top: 7px; }
+.k-msg-images.is-single { display: block; width: auto; margin-top: 0; }
+.k-msg-img-link { display: block; border-radius: 10px; overflow: hidden; line-height: 0; background: var(--k-water-mist); }
+.k-msg-img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.k-msg-images.is-single .k-msg-img { width: auto; max-width: min(100%, 430px); max-height: 430px; aspect-ratio: auto; object-fit: contain; }
+.k-msg-img.is-broken { display: none; }
+.k-bubble.images-only { padding: 0; border: 0; border-radius: 12px; background: transparent; box-shadow: none; }
+.k-bubble.images-only .k-msg-images { margin-top: 0; }
 .k-thought { margin: 7px 0 0 38px; padding: 6px 10px 6px 12px; border-left: 1px dashed var(--k-line); background: linear-gradient(90deg, var(--k-water-mist), transparent 80%); font-family: var(--serif); font-size: 11.5px; line-height: 1.75; color: var(--k-ink2); font-style: italic; }
 .k-thought b { display: inline-flex; align-items: center; gap: 4px; font-family: var(--sans); font-style: normal; font-size: 9px; font-weight: 500; letter-spacing: .08em; color: var(--k-ink3); margin-right: 5px; }
 .k-thought b svg { width: 10px; height: 10px; }
@@ -195,6 +204,17 @@
 .k-pinbar { display: none; }
 .k-composer { width: min(100%, 760px); margin: 0 auto; display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 13px; border: 1px solid var(--k-line); border-radius: 17px; background: var(--k-panel); box-shadow: 0 10px 26px -24px rgba(34,48,46,.55); transition: border-color .2s, box-shadow .2s; }
 .k-composer:focus-within { border-color: var(--k-water); box-shadow: 0 0 0 3px color-mix(in srgb, var(--k-water) 12%, transparent), 0 10px 26px -24px rgba(34,48,46,.55); }
+.k-composer.is-drop { border-color: var(--k-water); box-shadow: 0 0 0 3px color-mix(in srgb, var(--k-water) 18%, transparent); }
+.k-pick { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 50%; color: var(--k-ink3); background: transparent; transition: color .15s, background .15s; }
+.k-pick:hover { color: var(--k-water-deep); background: var(--k-water-mist); }
+.k-pick svg { width: 16px; height: 16px; }
+/* 待发送的图片 */
+.k-attach { width: min(100%, 760px); margin: 0 auto 7px; display: flex; flex-wrap: wrap; gap: 6px; }
+.k-attach-item { position: relative; width: 58px; height: 58px; margin: 0; border: 1px solid var(--k-line); border-radius: 10px; overflow: hidden; background: var(--k-panel); }
+.k-attach-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.k-attach-x { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; background: rgba(15,25,26,.72); color: #fff; }
+.k-attach-x:hover { background: var(--k-danger); }
+.k-attach-x svg { width: 9px; height: 9px; }
 .k-composer textarea { flex: 1; min-height: 24px; max-height: 130px; padding: 4px 0; border: 0; outline: 0; resize: none; background: transparent; font-size: 13px; line-height: 1.7; color: var(--k-ink); }
 .k-composer textarea::placeholder { color: var(--k-ink3); opacity: .8; }
 .k-send { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--k-water); color: #fff; transition: background .15s, transform .15s, opacity .15s; }

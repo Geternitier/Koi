@@ -179,6 +179,27 @@ class MediaFrame(BaseModel):
     t: float = 0.0
 
 
+class ImageRef(BaseModel):
+    """事件 payload 里的一张图片。path 相对插件工作目录，字节不进入事件。"""
+
+    path: str
+    # 给她看的说明，例如「主人发来的图片（cat.jpg）」
+    caption: str = ""
+
+
+def sniff_image(data: bytes) -> str | None:
+    """按文件头判断图片类型，不看扩展名。SVG 能带脚本，不在识别范围内。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return None
+
+
 class ImageData(BaseModel):
     info: ImageInfo
     # JSON 里是 base64
@@ -311,6 +332,7 @@ __all__ = [
     "EventIn",
     "ImageData",
     "ImageInfo",
+    "ImageRef",
     "Interaction",
     "InteractionField",
     "InteractionKind",
@@ -324,4 +346,5 @@ __all__ = [
     "PluginContext",
     "SharedDiary",
     "TrustLevel",
+    "sniff_image",
 ]

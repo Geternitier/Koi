@@ -34,7 +34,6 @@ from koi.kernel.instance import (
 )
 from koi.kernel.interactions import InteractionService
 from koi.kernel.llm import LLMConfig, LLMGateway
-from koi.kernel.media import frame_caption
 from koi.kernel.paths import KoiPaths
 from koi.kernel.plugins import PluginHost
 from koi.kernel.process import PluginSpec, ProcessPlugin, load_specs
@@ -253,7 +252,15 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         secrets=secrets,
         redactor=redactor,
     )
-    host.add(WebPlugin(port=port, history_path=paths.data / "web" / "history.jsonl"))
+    host.add(
+        WebPlugin(
+            port=port,
+            history_path=paths.data / "web" / "history.jsonl",
+            image_dir=paths.data / "web" / "images",
+        )
+    )
+    # 上传的图片放在 data/web/images，事件里只带相对这个目录的路径
+    host.set_work_dir("web", paths.data / "web")
     env = scrubbed_env(secrets)
     specs = load_specs(paths.plugins)
     if instance.config.harness and not args.no_harness:
@@ -261,16 +268,29 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
     for spec in specs:
         host.add(ProcessPlugin(spec, env=env))
 
+    def sendable() -> list[tuple[str, str]]:
+        """她能发到网页上的图片。以后工具产出的图也登记在这里，Web 侧不用改。"""
+        items = [("avatar", "头像")] if appearance.avatar else []
+        return items + [(img.id, img.caption or img.id) for img in appearance.images]
+
     def toolbox() -> list[ToolSpec]:
-        return [
-            ToolSpec(
-                name=f"{pid}.{c.name}",
-                description=c.description,
-                parameters=c.parameters,
-                energy_cost=c.energy_cost,
+        images = sendable()
+        specs: list[ToolSpec] = []
+        for pid, c in host.tools():
+            params = dict(c.parameters)
+            if pid == "web" and c.name == "send_image":
+                if not images:
+                    continue
+                params["image"] = "图片 ID：" + "、".join(f"{i}（{cap}）" for i, cap in images)
+            specs.append(
+                ToolSpec(
+                    name=f"{pid}.{c.name}",
+                    description=c.description,
+                    parameters=params,
+                    energy_cost=c.energy_cost,
+                )
             )
-            for pid, c in host.tools()
-        ]
+        return specs
 
     journal = Journal(paths.memory / "episodes")
     journal.load(clock.now())
@@ -295,9 +315,9 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         tools=toolbox,
         owner_call=profile.owner_call,
         people=People(paths.memory / "people", owner_call=profile.owner_call),
-        media_loader=lambda plugin_id, frames: [
-            SeenImage(caption=frame_caption(t), data=data)
-            for t, data in host.load_frames(plugin_id, frames)
+        media_loader=lambda plugin_id, refs: [
+            SeenImage(caption=caption, media_type=media_type, data=data)
+            for caption, media_type, data in host.load_images(plugin_id, refs)
         ],
     )
 

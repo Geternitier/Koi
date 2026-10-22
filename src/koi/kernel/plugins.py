@@ -21,9 +21,12 @@ from koi.kernel.media import (
     MAX_MEDIA_ENERGY,
     MEDIA_TEXT_CHARS,
     MediaError,
+    frame_caption,
     read_frame,
+    read_image,
     relative_posix,
     resolve_frame,
+    resolve_image,
 )
 from koi.kernel.secrets import Redactor, SecretStore
 from koi.kernel.store import Store
@@ -321,6 +324,39 @@ class PluginHost:
                 loaded.append((float(frame.get("t") or 0), data))
             except (MediaError, TypeError, ValueError, OSError):
                 continue
+        return loaded
+
+    def load_images(
+        self, plugin_id: str, refs: list[dict[str, Any]]
+    ) -> list[tuple[str, str, bytes]]:
+        """按事件里的相对路径读图片，返回 (说明, media_type, 字节)。
+
+        文件不在、路径不合法或不是 PNG/JPEG/WebP 时跳过，不抛错。
+        """
+        root = self._work_dirs.get(plugin_id)
+        if root is None:
+            return []
+        loaded: list[tuple[str, str, bytes]] = []
+        for ref in refs[:MAX_FRAMES]:
+            if not isinstance(ref, dict):
+                continue
+            rel = ref.get("path")
+            if not isinstance(rel, str):
+                continue
+            caption = ref.get("caption")
+            if not isinstance(caption, str) or not caption.strip():
+                if "t" in ref:
+                    try:
+                        caption = frame_caption(float(ref.get("t") or 0))
+                    except (TypeError, ValueError):
+                        caption = ""
+                else:
+                    caption = "图片"
+            try:
+                data, media_type = read_image(resolve_image(root, rel))
+            except (MediaError, OSError):
+                continue
+            loaded.append((caption.strip(), media_type, data))
         return loaded
 
     @property

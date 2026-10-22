@@ -8,8 +8,9 @@ from pydantic import BaseModel
 
 from koi.kernel import Event, EventBus, Priority, Scheduler, SimClock, Trust
 from koi.kernel.llm import Usage
-from koi.persona import Journal, Persona, PersonaParams, PersonaProfile, Status
+from koi.persona import Journal, Persona, PersonaParams, PersonaProfile, Status, WakeReason
 from koi.persona.llm_mind import ActOutput, LLMMind, PerceiveOutput
+from koi.persona.mind import SeenImage
 from koi.persona.params import AffectParams, SleepParams
 
 TZ = timezone(timedelta(hours=8))
@@ -233,3 +234,76 @@ async def test_alarm_from_act_output_is_scheduled():
     await sched.run_until(t + timedelta(seconds=1))
     (alarm,) = persona.state.alarms.values()
     assert alarm.at == datetime(2026, 10, 20, 15, tzinfo=TZ)
+
+
+class _ImageRejected(Exception):
+    status_code = 400
+
+
+class _VisionLLM:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+
+    async def chat_json(self, messages, schema, **kwargs):
+        self.calls.append((list(messages), kwargs))
+        if isinstance(messages[1]["content"], list):
+            raise _ImageRejected("image_url is not supported")
+        return schema.model_validate({"replies": []}), USAGE
+
+
+async def test_vision_rejection_falls_back_to_text_once():
+    clock = SimClock(T0)
+    llm = _VisionLLM()
+    mind = LLMMind(llm, PROFILE, PARAMS.mind)
+    persona = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=mind,
+        journal=Journal(),
+    )
+    ctx = persona._context(WakeReason.OWNER, [], [])
+    image = SeenImage(caption="一张图", media_type="image/png", data=b"\x89PNG\r\n\x1a\n")
+    ctx = ctx.model_copy(update={"images": [image]})
+
+    await mind.act(ctx, [])
+    assert len(llm.calls) == 2
+    assert isinstance(llm.calls[0][0][1]["content"], list)
+    assert isinstance(llm.calls[1][0][1]["content"], str)
+    assert "没能送到你眼前" in llm.calls[1][0][1]["content"]
+
+    # 记住模型不接受图片，下次不再附图
+    await mind.act(ctx, [])
+    assert len(llm.calls) == 3
+    assert isinstance(llm.calls[2][0][1]["content"], str)
+
+
+class _RecordingLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat_json(self, messages, schema, **kwargs):
+        self.calls.append(kwargs)
+        return schema.model_validate({"replies": []}), USAGE
+
+
+async def test_vision_model_is_used_only_with_images():
+    params = PARAMS.mind.model_copy(update={"model": "text-model", "vision_model": "vision-model"})
+    llm = _RecordingLLM()
+    mind = LLMMind(llm, PROFILE, params)
+    clock = SimClock(T0)
+    persona = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=mind,
+        journal=Journal(),
+    )
+    ctx = persona._context(WakeReason.OWNER, [], [])
+    image = SeenImage(caption="一张图", media_type="image/png", data=b"\x89PNG\r\n\x1a\n")
+    await mind.act(ctx.model_copy(update={"images": [image]}), [])
+    await mind.act(ctx, [])
+    assert llm.calls[0]["model"] == "vision-model"
+    assert llm.calls[1]["model"] == "text-model"

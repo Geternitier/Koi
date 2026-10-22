@@ -75,7 +75,7 @@ log = logging.getLogger(__name__)
 Actuator = Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 # 当前可用的工具
 Toolbox = Callable[[], list[ToolSpec]]
-# (插件 ID, 事件里的 frames) -> 这一次能看见的画面
+# (插件 ID, 事件里的 images 或 frames) -> 这一次能看见的图片
 MediaLoader = Callable[[str, list[dict[str, Any]]], list[SeenImage]]
 MAX_MEDIA_ENERGY = 30.0
 
@@ -857,16 +857,18 @@ class Persona:
         st.affect = apply_impulse(st.affect, dv, 0.0)
 
     def _images_for(self, events: list[Event]) -> list[SeenImage]:
+        """这次能看见的图片：插件交出的画面，或主人消息里附的图片。
+
+        两种都只记工作目录内的相对路径，到这里才按来源读文件。
+        """
         if self.media_loader is None:
             return []
         images: list[SeenImage] = []
         for event in events:
-            if event.type != "media":
-                continue
-            frames = event.payload.get("frames")
-            if not isinstance(frames, list):
-                continue
-            images.extend(self.media_loader(event.source, frames))
+            for key in ("images", "frames"):
+                refs = event.payload.get(key)
+                if isinstance(refs, list) and refs:
+                    images.extend(self.media_loader(event.source, refs))
         return images[:8]
 
     def _context(
