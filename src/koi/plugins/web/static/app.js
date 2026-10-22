@@ -37,7 +37,7 @@
     boot: $("boot"), bootText: $("bootText"), bootErr: $("bootErr"), bootRetry: $("bootRetry"),
     bell: $("bellBtn"), bellBadge: $("bellBadge"), cmd: $("cmdBtn"),
     theme: $("themeBtn"), railTheme: $("railTheme"),
-    railAvatar: $("railAvatar"), topAvatar: $("topAvatar"), railDot: $("railDot")
+    railAvatar: $("railAvatar"), railDot: $("railDot")
   };
 
   const STATUS_WORD = { sleeping: "睡着了", dozing: "发呆中", active: "正在想" };
@@ -1821,7 +1821,6 @@
   els.msPending.addEventListener("click", openSide);
   els.pinbarBtn.addEventListener("click", openSide);
   els.railAvatar.addEventListener("click", openSide);
-  els.topAvatar.addEventListener("click", openSide);
 
   els.theme.addEventListener("click", toggleTheme);
   els.railTheme.addEventListener("click", toggleTheme);
