@@ -165,6 +165,14 @@ class AppearanceView(BaseModel):
     images: list[ImageInfo] = Field(default_factory=list)
 
 
+class MediaFrame(BaseModel):
+    """插件工作目录里的一张画面。path 是相对路径。"""
+
+    path: str
+    # 在视频里的秒数，核心换成「第 N 秒」给她看
+    t: float = 0.0
+
+
 class ImageData(BaseModel):
     info: ImageInfo
     # JSON 里是 base64
@@ -254,6 +262,15 @@ class PluginContext(Protocol):
 
     async def delete_secret(self, name: str) -> None: ...
 
+    async def offer_media(
+        self, text: str, frames: list[MediaFrame], *, energy_cost: float = 0.0
+    ) -> None:
+        """把她刚看见的画面交给下一次思考。
+
+        图片留在插件工作目录。事件里只记录说明和相对路径，不记录图片字节。
+        """
+        ...
+
 
 class Plugin(Protocol):
     """插件接口。
@@ -293,6 +310,7 @@ __all__ = [
     "InteractionRequest",
     "InteractionStatus",
     "Manifest",
+    "MediaFrame",
     "MemorySnapshot",
     "Permission",
     "Plugin",

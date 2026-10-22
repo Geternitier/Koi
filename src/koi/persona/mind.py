@@ -83,6 +83,14 @@ class ToolResult(BaseModel):
     result: str
 
 
+class SeenImage(BaseModel):
+    """这一次思考附带的画面。只活在内存里，不写进事件或经历。"""
+
+    caption: str
+    media_type: str = "image/jpeg"
+    data: bytes
+
+
 class WakeContext(BaseModel):
     reason: WakeReason
     events: list[Event]
@@ -100,6 +108,8 @@ class WakeContext(BaseModel):
     event_people: list[str | None] = Field(default_factory=list)
     # 这次涉及的人
     people: list[PersonBrief] = Field(default_factory=list)
+    # 插件交给她看的画面。附在这一次表达的用户消息末尾，不进系统提示词
+    images: list[SeenImage] = Field(default_factory=list)
 
 
 class WakeOutcome(BaseModel):

@@ -25,6 +25,7 @@ from koi.protocol import (
     Interaction,
     InteractionRequest,
     Manifest,
+    MediaFrame,
     Permission,
     PluginContext,
     TrustLevel,
@@ -326,6 +327,14 @@ class ProcessPlugin:
                 return {}
             case "koi/secret/delete":
                 await ctx.delete_secret(str(params["name"]))
+                return {}
+            case "koi/media":
+                frames = [MediaFrame.model_validate(item) for item in params.get("frames") or []]
+                await ctx.offer_media(
+                    str(params.get("text") or ""),
+                    frames,
+                    energy_cost=float(params.get("energy_cost") or 0),
+                )
                 return {}
             case _:
                 raise RpcError(METHOD_NOT_FOUND, f"未知方法：{method}")

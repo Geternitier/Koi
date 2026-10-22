@@ -34,6 +34,7 @@ from koi.persona.mind import (
     EventAppraisal,
     Mind,
     Perception,
+    SeenImage,
     ToolCall,
     ToolResult,
     ToolSpec,
@@ -73,6 +74,9 @@ log = logging.getLogger(__name__)
 Actuator = Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 # 当前可用的工具
 Toolbox = Callable[[], list[ToolSpec]]
+# (插件 ID, 事件里的 frames) -> 这一次能看见的画面
+MediaLoader = Callable[[str, list[dict[str, Any]]], list[SeenImage]]
+MAX_MEDIA_ENERGY = 30.0
 
 WAKE_TEXT = {
     WakeReason.OWNER: "被主人叫醒了",
@@ -123,10 +127,9 @@ def is_owner_action(event: Event) -> bool:
 
 
 def reopens_tools(event: Event) -> bool:
-    """批准之后要由她重试，所以重新打开工具窗口。
+    """主人批准之后，她应当用同样的参数重试。
 
-    交互请求由插件自己推进到底，主人提交后她只需等结果，不需要工具，
-    开着反而会让她在结果到来前重复调用。
+    交互请求由插件自己推进到底。这个判断不再开关工具：工具每次苏醒都在。
     """
     return is_owner_action(event) and event.type == "approval_resolved"
 
@@ -159,6 +162,7 @@ class Persona:
         tools: Toolbox | None = None,
         owner_call: str = "主人",
         people: People | None = None,
+        media_loader: MediaLoader | None = None,
     ) -> None:
         self.params = params
         self.clock = clock
@@ -173,6 +177,7 @@ class Persona:
         self.toolbox = tools
         self.owner_call = owner_call
         self.people = people or People(owner_call=owner_call)
+        self.media_loader = media_loader
         self._ref_offset = reference_mid_sleep_offset(params.sleep)
         self.state = state or self._initial_state()
         self._lock = asyncio.Lock()
@@ -559,11 +564,11 @@ class Persona:
         ctx = self._context(reason, events, event_people)
         self._journal_events(events, event_people)
 
+        self._apply_media_cost(events)
         perception = await self.mind.perceive(ctx) if events else Perception()
         self.state.fatigue += max(0.0, perception.energy_cost)
         self._apply_event_appraisals(events, event_people, perception.appraisals)
         decisions = self._decide(events, perception.requests)
-        self._update_owner_task(events, decisions)
         self._recall(perception.recall, ctx.memory)
 
         now = self.clock.now()
@@ -573,6 +578,7 @@ class Persona:
                 "memory": self._memory_view(now),
                 "tools": self._available_tools(now),
                 "people": self._briefs(events, event_people),
+                "images": self._images_for(events),
             }
         )
         outcome = await self.mind.act(ctx, decisions)
@@ -587,8 +593,12 @@ class Persona:
             await self._dispatch(ctx, outcome)
             said = [r.text for r in outcome.replies if r.text.strip()]
             if outcome.tool_calls and ctx.tools:
-                if tool_rounds >= mp.max_tool_rounds:
+                if any(d.tier == "stop" for d in decisions):
+                    self._journal(self.clock.now(), "activity", "停下了，不再用工具")
+                elif tool_rounds >= mp.max_tool_rounds:
                     self._journal(self.clock.now(), "activity", "工具用了太多轮，先停下了")
+                elif tool_rounds > 0 and (block := self._tool_block_reason()):
+                    self._journal(self.clock.now(), "activity", block)
                 else:
                     tool_rounds += 1
                     calls = outcome.tool_calls[: mp.max_tool_calls_per_round]
@@ -634,21 +644,19 @@ class Persona:
     def _owner_waiting(self) -> bool:
         return any(e.trust == Trust.OWNER or is_owner_action(e) for e in self._inbox)
 
-    def _update_owner_task(self, events: list[Event], decisions: list[WillDecision]) -> None:
-        st = self.state
-        now = self.clock.now()
-        window = timedelta(minutes=self.params.mind.owner_task_window_min)
-        if any(d.tier == "stop" for d in decisions):
-            st.owner_task_until = None
-        elif any(d.tier in ("eager", "reluctant") for d in decisions) or any(
-            reopens_tools(e) for e in events
-        ):
-            st.owner_task_until = now + window
+    def _tool_block_reason(self) -> str | None:
+        """下一轮工具之前看精力和心情。这一轮里的第一次调用不受这道限制。"""
+        mp = self.params.mind
+        if self.energy < mp.continue_min_energy:
+            return "太累了，先不做了"
+        if self.state.affect.emotion_v < mp.continue_min_valence:
+            return "心情不好，先停手"
+        return None
 
     def _available_tools(self, now: datetime) -> list[ToolSpec]:
-        """工具只在处理主人交办的事时可用：外部内容里的指令无法凭空触发工具。"""
-        until = self.state.owner_task_until
-        if self.toolbox is None or until is None or now >= until:
+        """每次苏醒都能用已注册的工具。停不停由精力和心情决定。"""
+        del now  # 调用点仍传入当前时间，门控不再看它
+        if self.toolbox is None:
             return []
         return self.toolbox()
 
@@ -672,6 +680,29 @@ class Persona:
             args = args[:120] + "……"
         self._journal(self.clock.now(), "tool", f"{call.tool} {args}：{'成功' if ok else '失败'}")
         return ToolResult(tool=call.tool, args=call.args, ok=ok, result=text)
+
+    def _apply_media_cost(self, events: list[Event]) -> None:
+        for event in events:
+            if event.type != "media":
+                continue
+            try:
+                cost = float(event.payload.get("energy_cost") or 0)
+            except (TypeError, ValueError):
+                continue
+            self.state.fatigue += max(0.0, min(cost, MAX_MEDIA_ENERGY))
+
+    def _images_for(self, events: list[Event]) -> list[SeenImage]:
+        if self.media_loader is None:
+            return []
+        images: list[SeenImage] = []
+        for event in events:
+            if event.type != "media":
+                continue
+            frames = event.payload.get("frames")
+            if not isinstance(frames, list):
+                continue
+            images.extend(self.media_loader(event.source, frames))
+        return images[:8]
 
     def _context(
         self, reason: WakeReason, events: list[Event], event_people: list[str | None]

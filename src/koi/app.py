@@ -34,6 +34,7 @@ from koi.kernel.instance import (
 )
 from koi.kernel.interactions import InteractionService
 from koi.kernel.llm import LLMConfig, LLMGateway
+from koi.kernel.media import frame_caption
 from koi.kernel.paths import KoiPaths
 from koi.kernel.plugins import PluginHost
 from koi.kernel.process import PluginSpec, ProcessPlugin, load_specs
@@ -58,6 +59,7 @@ from koi.persona import (
 from koi.persona.appearance import Image, load_appearance
 from koi.persona.core import STATE_KEY
 from koi.persona.llm_mind import LLMMind
+from koi.persona.mind import SeenImage
 from koi.persona.templates import TemplateError
 from koi.plugins.web import WebPlugin
 from koi.protocol import AppearanceView, ImageData, ImageInfo
@@ -293,6 +295,10 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         tools=toolbox,
         owner_call=profile.owner_call,
         people=People(paths.memory / "people", owner_call=profile.owner_call),
+        media_loader=lambda plugin_id, frames: [
+            SeenImage(caption=frame_caption(t), data=data)
+            for t, data in host.load_frames(plugin_id, frames)
+        ],
     )
 
     def _iso(value: datetime | None) -> str | None:

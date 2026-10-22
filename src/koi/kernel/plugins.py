@@ -9,12 +9,22 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from koi.kernel.approvals import ApprovalService
 from koi.kernel.bus import Event, EventBus, Priority, Trust
 from koi.kernel.clock import Clock
 from koi.kernel.interactions import InteractionService
+from koi.kernel.media import (
+    MAX_FRAMES,
+    MAX_MEDIA_ENERGY,
+    MEDIA_TEXT_CHARS,
+    MediaError,
+    read_frame,
+    relative_posix,
+    resolve_frame,
+)
 from koi.kernel.secrets import Redactor, SecretStore
 from koi.kernel.store import Store
 from koi.protocol import (
@@ -28,6 +38,7 @@ from koi.protocol import (
     Interaction,
     InteractionRequest,
     Manifest,
+    MediaFrame,
     MemorySnapshot,
     Permission,
     Plugin,
@@ -164,6 +175,11 @@ class _Context:
         assert self._host.secrets is not None
         self._host.secrets.delete(key)
 
+    async def offer_media(
+        self, text: str, frames: list[MediaFrame], *, energy_cost: float = 0.0
+    ) -> None:
+        self._host.offer_media(self.plugin_id, text, frames, energy_cost=energy_cost)
+
 
 def plugin_secret_name(plugin_id: str, name: str) -> str:
     return f"plugin.{plugin_id}.{name}"
@@ -194,6 +210,7 @@ class PluginHost:
         self._memory_provider: MemoryProvider | None = None
         self._appearance_provider: AppearanceProvider | None = None
         self._image_provider: ImageProvider | None = None
+        self._work_dirs: dict[str, Path] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         if approvals is not None:
             approvals.bind(self._on_approval)
@@ -213,6 +230,9 @@ class PluginHost:
                 value = self.secrets.get(key)
                 if value is not None and self.redactor is not None:
                     self.redactor.add(key, value.get_secret_value())
+        cwd = getattr(getattr(plugin, "spec", None), "cwd", None)
+        if cwd:
+            self.set_work_dir(pid, Path(cwd))
 
     def set_state_provider(self, provider: StateProvider) -> None:
         self._state_provider = provider
@@ -223,6 +243,76 @@ class PluginHost:
     def set_appearance_provider(self, appearance: AppearanceProvider, image: ImageProvider) -> None:
         self._appearance_provider = appearance
         self._image_provider = image
+
+    def set_work_dir(self, plugin_id: str, path: Path) -> None:
+        """插件进程的工作目录。画面只能从这里读。"""
+        self._work_dirs[plugin_id] = path
+
+    def offer_media(
+        self,
+        plugin_id: str,
+        text: str,
+        frames: list[MediaFrame],
+        *,
+        energy_cost: float = 0.0,
+    ) -> None:
+        """校验画面路径后发一条 media 事件。payload 只有说明和相对路径。"""
+        if plugin_id not in self._plugins:
+            raise PluginError(f"未知插件：{plugin_id}")
+        root = self._work_dirs.get(plugin_id)
+        if root is None:
+            raise PluginError(f"插件 {plugin_id} 没有工作目录，不能提交画面")
+        if len(frames) > MAX_FRAMES:
+            raise PluginError(f"一次最多 {MAX_FRAMES} 张画面")
+        stored: list[dict[str, Any]] = []
+        for frame in frames:
+            try:
+                path = resolve_frame(root, frame.path)
+                read_frame(path)
+                stored.append({"path": relative_posix(root, path), "t": frame.t})
+            except MediaError as e:
+                raise PluginError(str(e)) from e
+        summary = _clip(text.strip(), MEDIA_TEXT_CHARS)
+        if not summary and not stored:
+            raise PluginError("没有可看的内容")
+        try:
+            cost = float(energy_cost)
+        except (TypeError, ValueError) as e:
+            raise PluginError("精力消耗无效") from e
+        event = Event(
+            type="media",
+            priority=Priority.P2,
+            source=plugin_id,
+            trust=Trust.EXTERNAL,
+            time=self.clock.now(),
+            payload={
+                "text": summary,
+                "frames": stored,
+                "energy_cost": max(0.0, min(cost, MAX_MEDIA_ENERGY)),
+            },
+        )
+        task = asyncio.create_task(self.bus.publish(event))
+        self._tasks.add(task)
+        task.add_done_callback(self._on_done)
+
+    def load_frames(
+        self, plugin_id: str, frames: list[dict[str, Any]]
+    ) -> list[tuple[float, bytes]]:
+        """按事件里的相对路径读 JPEG。文件不在或路径不合法时跳过，不抛错。"""
+        root = self._work_dirs.get(plugin_id)
+        if root is None:
+            return []
+        loaded: list[tuple[float, bytes]] = []
+        for frame in frames[:MAX_FRAMES]:
+            rel = frame.get("path")
+            if not isinstance(rel, str):
+                continue
+            try:
+                data = read_frame(resolve_frame(root, rel))
+                loaded.append((float(frame.get("t") or 0), data))
+            except (MediaError, TypeError, ValueError, OSError):
+                continue
+        return loaded
 
     @property
     def plugin_ids(self) -> list[str]:

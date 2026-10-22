@@ -119,10 +119,11 @@ class MindParams(_Params):
     share_memory: bool = False
     proactive_min_interval_h: float = 2.0
     consolidate_temperature: float = 0.7
-    # 答应主人的事之后这么久内可以用工具（审批结果也会延长）
+    # 旧字段。工具不再按这个窗口开关，保留是为了旧存档还能读。
     owner_task_window_min: float = 30.0
-    max_tool_rounds: int = 6
-    max_tool_calls_per_round: int = 3
+    # 一轮思考里工具循环的天花板。平时由精力和心情提前停，不是日常配额。
+    max_tool_rounds: int = 24
+    max_tool_calls_per_round: int = 8
     tool_result_chars: int = 6000
     # 第一拍之后最多再开口几次，用来把一段信息拆成多条消息
     max_speech_rounds: int = 3
