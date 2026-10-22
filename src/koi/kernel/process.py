@@ -9,6 +9,7 @@
 import asyncio
 import contextlib
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -168,12 +169,16 @@ class ProcessPlugin:
             delay = min(delay * 2, self.restart_max_s)
 
     async def _spawn(self) -> None:
+        # 协议和日志都按 UTF-8 读写；Windows 默认的 cp936 会把中文变成替换字符
+        env = dict(self._env if self._env is not None else os.environ)
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
         proc = await asyncio.create_subprocess_exec(
             *self.spec.entry,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=self._env,
+            env=env,
             cwd=self.spec.cwd,
             limit=STREAM_LIMIT,
         )
