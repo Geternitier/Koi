@@ -113,6 +113,10 @@ class WillParams(_Params):
 
 class MindParams(_Params):
     model: str | None = None
+    # 看图片时用的模型。空表示和 model 相同；模型不支持图片时会自动降级为纯文本
+    vision_model: str | None = None
+    # 带图时附几张自己的登记图（含头像）给她对照，0 表示不附
+    self_ref_images: int = 1
     perceive_temperature: float = 0.3
     act_temperature: float = 1.0
     journal_entries: int = 80

@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -10,7 +11,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
 import qrcode
@@ -21,7 +22,16 @@ from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from koi.protocol import Approval, Capability, EventIn, Interaction, Manifest, PluginContext
+from koi.protocol import (
+    Approval,
+    Capability,
+    EventIn,
+    ImageData,
+    Interaction,
+    Manifest,
+    PluginContext,
+    sniff_image,
+)
 
 log = logging.getLogger(__name__)
 
@@ -29,9 +39,17 @@ PAGE = Path(__file__).with_name("index.html")
 STATIC_DIR = Path(__file__).with_name("static")
 LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 KEEPALIVE_S = 15.0
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_UPLOAD_IMAGES = 4
+UPLOAD_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+UPLOAD_SUFFIX = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
+# 没被对话引用的上传图最多留这么多天、这么多份
+UPLOAD_KEEP_DAYS = 30
+UPLOAD_KEEP_FILES = 300
 CSP = (
     "default-src 'self'; "
-    "img-src 'self' data:; "
+    "img-src 'self' data: blob:; "
     "style-src 'self' 'unsafe-inline'; "
     "script-src 'self'; "
     "connect-src 'self'; "
@@ -54,8 +72,39 @@ def _secure(response: Response) -> Response:
     return response
 
 
+def _image_response(img: ImageData, *, max_age: int = 86400) -> Response:
+    # 页面用 ?v=<内容哈希> 取图，换了图地址就变，所以可以放心缓存
+    return Response(
+        img.data,
+        media_type=img.info.media_type,
+        headers={"Cache-Control": f"private, max-age={max_age}", "ETag": f'"{img.info.sha256}"'},
+    )
+
+
+def _upload_name(raw: str | None) -> str:
+    """上传时带过来的文件名，只留可打印字符，去掉路径分隔符和控制字符。"""
+    name = unquote(raw or "").strip()
+    name = "".join(ch for ch in name if ch.isprintable() and ch not in '\\/:*?"<>|')
+    return name[:120].strip() or "图片"
+
+
+def _history_images_ok(images: Any) -> bool:
+    """历史里的图片条目：只认本机接口的 URL，避免把外部地址带进页面。"""
+    if not isinstance(images, list) or len(images) > MAX_UPLOAD_IMAGES:
+        return False
+    return all(
+        isinstance(image, dict)
+        and isinstance(image.get("url"), str)
+        and image["url"].startswith("/api/")
+        for image in images
+    )
+
+
 class MessageIn(BaseModel):
-    text: str = Field(min_length=1, max_length=4000)
+    text: str = Field(default="", max_length=4000)
+    images: list[str] = Field(default_factory=list, max_length=MAX_UPLOAD_IMAGES)
+    # 页面用来把乐观消息和服务端回的这条对上，不参与展示
+    client_id: str | None = Field(default=None, max_length=64)
 
 
 class Decision(BaseModel):
@@ -91,6 +140,7 @@ class WebPlugin:
         port: int = 8765,
         history: int = 200,
         history_path: Path | None = None,
+        image_dir: Path | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -99,13 +149,26 @@ class WebPlugin:
             version="0.1.0",
             description="网页对话与状态",
             capabilities=[
-                Capability(name="send_message", description="向网页发送消息", tool=False)
+                Capability(name="send_message", description="向网页发送消息", tool=False),
+                Capability(
+                    name="send_image",
+                    description="把一张图片发到网页聊天里给主人看",
+                    parameters={
+                        "image": "图片 ID",
+                        "caption": "随图说的一句话，可空",
+                    },
+                    energy_cost=0.5,
+                    timeout_s=10.0,
+                ),
             ],
             max_trust="owner",
             permissions=["approve", "owner_ui", "appearance"],
         )
         self.history: deque[dict[str, Any]] = deque(maxlen=history)
         self._history_path = Path(history_path) if history_path is not None else None
+        if image_dir is None and history_path is not None:
+            image_dir = Path(history_path).parent / "images"
+        self._image_dir = Path(image_dir) if image_dir is not None else None
         self._persisted_lines = 0
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._ctx: PluginContext | None = None
@@ -114,6 +177,7 @@ class WebPlugin:
         self._state_task: asyncio.Task[None] | None = None
         self._last_state_sig = ""
         self._load_history()
+        self._prune_images()
 
     # ---------------------------------------------------------------- 插件接口
 
@@ -139,16 +203,18 @@ class WebPlugin:
                 await self._task
 
     async def call(self, capability: str, args: dict[str, Any]) -> dict[str, Any]:
-        if capability != "send_message":
-            raise ValueError(f"未知能力：{capability}")
-        self._publish(
-            {
-                "role": "system" if args.get("system") else "koi",
-                "text": str(args.get("text", "")),
-                "time": datetime.now().astimezone().isoformat(),
-            }
-        )
-        return {"ok": True}
+        if capability == "send_message":
+            self._publish(
+                {
+                    "role": "system" if args.get("system") else "koi",
+                    "text": str(args.get("text", "")),
+                    "time": datetime.now().astimezone().isoformat(),
+                }
+            )
+            return {"ok": True}
+        if capability == "send_image":
+            return await self._send_image(args)
+        raise ValueError(f"未知能力：{capability}")
 
     async def on_approval(self, approval: Approval) -> None:
         pass
@@ -184,12 +250,15 @@ class WebPlugin:
             except (TypeError, ValueError):
                 dirty = True
                 continue
-            if (
-                not isinstance(item, dict)
-                or item.get("role") not in {"owner", "koi", "system"}
-                or not isinstance(item.get("text"), str)
-                or not item["text"]
-            ):
+            if not isinstance(item, dict) or item.get("role") not in {"owner", "koi", "system"}:
+                dirty = True
+                continue
+            images = item.get("images")
+            if images is not None and not _history_images_ok(images):
+                dirty = True
+                continue
+            text = item.get("text")
+            if not isinstance(text, str) or (not text and not images):
                 dirty = True
                 continue
             if not item.get("id"):
@@ -237,12 +306,148 @@ class WebPlugin:
         except OSError:
             log.warning("写入聊天记录失败：%s", path, exc_info=True)
 
-    def _publish(self, message: dict[str, Any]) -> None:
+    def _publish(self, message: dict[str, Any]) -> dict[str, Any]:
         item = dict(message)
         item.setdefault("id", uuid4().hex)
         self.history.append(item)
         self._append_history(item)
         self._broadcast({"kind": "message", "data": item})
+        return item
+
+    async def _send_image(self, args: dict[str, Any]) -> dict[str, Any]:
+        """她把一张登记的图片发到网页上。image 是核心给的 ID，这里不假设来源。"""
+        image_id = str(args.get("image") or "").strip()
+        caption = str(args.get("caption") or "").strip()[:300]
+        if not image_id:
+            return {"ok": False, "error": "没有指定图片"}
+        try:
+            img = await self.ctx.image(image_id)
+        except Exception:
+            return {"ok": False, "error": f"没有这张图：{image_id}"}
+        item = self._publish(
+            {
+                "role": "koi",
+                "text": caption,
+                "time": datetime.now().astimezone().isoformat(),
+                "images": [
+                    {
+                        "id": image_id,
+                        "url": f"/api/images/{quote(image_id)}?v={img.info.sha256[:16]}",
+                        "media_type": img.info.media_type,
+                        "sha256": img.info.sha256,
+                        "alt": img.info.caption or image_id,
+                    }
+                ],
+            }
+        )
+        return {"ok": True, "image": image_id, "caption": caption, "message_id": item["id"]}
+
+    # ---------------------------------------------------------------- 上传图片
+
+    def _load_upload(self, image_id: str) -> tuple[dict[str, Any], bytes] | None:
+        """按 ID 读回上传的图片。ID 不是 32 位十六进制时直接拒绝，防止路径穿越。"""
+        directory = self._image_dir
+        if directory is None or not UPLOAD_ID.fullmatch(image_id):
+            return None
+        try:
+            meta = json.loads((directory / f"{image_id}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        file = meta.get("file")
+        if not isinstance(file, str) or Path(file).name != file:
+            return None
+        media_type = meta.get("media_type")
+        if media_type not in UPLOAD_TYPES:
+            return None
+        path = directory / file
+        if not path.is_file():
+            return None
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return None
+        # 磁盘上的内容也被改过时不相信 sidecar
+        if sniff_image(data) != media_type:
+            return None
+        return meta, data
+
+    def _save_upload(self, data: bytes, media_type: str, name: str) -> dict[str, Any]:
+        directory = self._image_dir
+        if directory is None:
+            raise HTTPException(503, "图片目录没有配置")
+        directory.mkdir(parents=True, exist_ok=True)
+        image_id = uuid4().hex
+        file = f"{image_id}{UPLOAD_SUFFIX[media_type]}"
+        path = directory / file
+        tmp = directory / f".{image_id}.tmp"
+        meta = {
+            "id": image_id,
+            "file": file,
+            "name": name,
+            "media_type": media_type,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+            "at": datetime.now().astimezone().isoformat(),
+        }
+        try:
+            tmp.write_bytes(data)
+            tmp.replace(path)
+            (directory / f"{image_id}.json").write_text(
+                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as e:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            with contextlib.suppress(OSError):
+                path.unlink()
+            raise HTTPException(500, "保存图片失败") from e
+        return meta
+
+    def _drop_upload(self, sidecar: Path) -> None:
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        directory = self._image_dir
+        if directory is not None and isinstance(meta, dict):
+            file = meta.get("file")
+            if isinstance(file, str) and Path(file).name == file:
+                with contextlib.suppress(OSError):
+                    (directory / file).unlink()
+        with contextlib.suppress(OSError):
+            sidecar.unlink()
+
+    def _prune_images(self) -> None:
+        """清掉没人引用的上传图，避免聊天越来越多把磁盘占满。"""
+        directory = self._image_dir
+        if directory is None or not directory.is_dir():
+            return
+        for path in directory.glob("*.tmp"):
+            with contextlib.suppress(OSError):
+                path.unlink()
+        referenced: set[str] = set()
+        for message in self.history:
+            for image in message.get("images") or []:
+                url = image.get("url") if isinstance(image, dict) else None
+                if isinstance(url, str) and url.startswith("/api/uploads/"):
+                    referenced.add(url.rsplit("/", 1)[-1].split("?", 1)[0])
+        sidecars = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        excess = max(0, len(sidecars) - UPLOAD_KEEP_FILES)
+        cutoff = datetime.now().timestamp() - UPLOAD_KEEP_DAYS * 86400
+        for sidecar in sidecars:
+            if not sidecar.exists() or sidecar.stem in referenced:
+                continue
+            try:
+                stale = sidecar.stat().st_mtime < cutoff
+            except OSError:
+                continue
+            if excess > 0:
+                excess -= 1
+            elif not stale:
+                continue
+            self._drop_upload(sidecar)
 
     async def _state_loop(self) -> None:
         """把状态变化推给页面，省掉高频轮询。断线时客户端仍会自行补拉。"""
@@ -334,11 +539,60 @@ class WebPlugin:
                 img = await self.ctx.image("avatar")
             except Exception:
                 raise HTTPException(404, "没有头像") from None
-            # 页面用 ?v=<内容哈希> 取图，换了图地址就变，所以可以放心缓存
+            return _image_response(img)
+
+        @app.get("/api/images/{image_id}")
+        async def shared_image(image_id: str) -> Response:
+            """她已经登记的图片：目前是形象图，以后工具产出的图也用同一入口。"""
+            try:
+                img = await self.ctx.image(image_id)
+            except Exception:
+                raise HTTPException(404, "没有这张图") from None
+            return _image_response(img)
+
+        @app.post("/api/uploads")
+        async def upload(request: Request) -> dict[str, Any]:
+            if self._image_dir is None:
+                raise HTTPException(503, "图片目录没有配置")
+            declared = request.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, "图片太大（上限 5 MB）")
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "图片太大（上限 5 MB）")
+            data = bytes(body)
+            if not data:
+                raise HTTPException(400, "图片是空的")
+            media_type = sniff_image(data)
+            if media_type not in UPLOAD_TYPES:
+                raise HTTPException(415, "只支持 PNG、JPEG、WebP 图片")
+            name = _upload_name(request.headers.get("x-koi-filename"))
+            meta = self._save_upload(data, media_type, name)
+            return {
+                "id": meta["id"],
+                "url": f"/api/uploads/{meta['id']}",
+                "media_type": meta["media_type"],
+                "sha256": meta["sha256"],
+                "size": meta["size"],
+                "name": meta["name"],
+            }
+
+        @app.get("/api/uploads/{image_id}")
+        async def uploaded(image_id: str) -> Response:
+            found = self._load_upload(image_id)
+            if found is None:
+                raise HTTPException(404, "没有这张图片")
+            meta, data = found
             return Response(
-                img.data,
-                media_type=img.info.media_type,
-                headers={"Cache-Control": "private, max-age=86400", "ETag": f'"{img.info.sha256}"'},
+                data,
+                media_type=str(meta["media_type"]),
+                headers={
+                    "Cache-Control": "private, max-age=31536000, immutable",
+                    "ETag": f'"{meta["sha256"]}"',
+                    "Content-Disposition": (f"inline; filename*=UTF-8''{quote(str(meta['name']))}"),
+                },
             )
 
         @app.get("/api/approvals")
@@ -400,16 +654,42 @@ class WebPlugin:
             return {"ok": True}
 
         @app.post("/api/messages", status_code=202)
-        async def post_message(msg: MessageIn) -> dict[str, bool]:
+        async def post_message(msg: MessageIn) -> dict[str, Any]:
             text = msg.text.strip()
-            if not text:
+            image_ids = list(dict.fromkeys(msg.images))
+            if not text and not image_ids:
                 raise HTTPException(422, "消息不能为空")
+            if len(image_ids) > MAX_UPLOAD_IMAGES:
+                raise HTTPException(422, f"一条消息最多 {MAX_UPLOAD_IMAGES} 张图片")
+            refs: list[dict[str, str]] = []
+            shown: list[dict[str, str]] = []
+            for image_id in image_ids:
+                found = self._load_upload(image_id)
+                if found is None:
+                    raise HTTPException(422, "有图片已经不在了，请重新添加")
+                meta, _ = found
+                refs.append(
+                    {
+                        "path": f"images/{meta['file']}",
+                        "caption": f"主人发来的图片（{meta['name']}）",
+                    }
+                )
+                shown.append(
+                    {
+                        "id": image_id,
+                        "url": f"/api/uploads/{image_id}",
+                        "media_type": str(meta["media_type"]),
+                        "sha256": str(meta["sha256"]),
+                        "alt": str(meta["name"]),
+                    }
+                )
             now = datetime.now().astimezone().isoformat()
-            target = _capture(await self.ctx.interactions(), text)
+            # 带图的消息不参与验证码截获：主人是在分享图片，不是在填表
+            target = _capture(await self.ctx.interactions(), text) if not image_ids else None
             if target is not None:
                 field = target.fields[0]
-                shown = "•" * len(text) if field.sensitive else text
-                self._publish({"role": "owner", "text": shown, "time": now})
+                shown_text = "•" * len(text) if field.sensitive else text
+                self._publish({"role": "owner", "text": shown_text, "time": now})
                 try:
                     await self.ctx.submit_interaction(target.id, {field.name: text})
                 except Exception as e:
@@ -417,12 +697,23 @@ class WebPlugin:
                 else:
                     self._system(f"已作为「{field.label}」提交给「{target.title}」，不会发给她")
                 return {"ok": True, "captured": True}
-            self._publish({"role": "owner", "text": text, "time": now})
+            item = self._publish(
+                {
+                    "role": "owner",
+                    "text": text,
+                    "time": now,
+                    "images": shown,
+                    "client_id": msg.client_id,
+                }
+            )
+            payload: dict[str, Any] = {"text": text or f"（发来 {len(refs)} 张图片）"}
+            if refs:
+                payload["images"] = refs
             # 普通消息是 P2：睡着时留给她醒来再看；带急事字样的由核心升级
             await self.ctx.emit(
-                EventIn(type="owner_message", priority=2, trust="owner", payload={"text": text})
+                EventIn(type="owner_message", priority=2, trust="owner", payload=payload)
             )
-            return {"ok": True}
+            return {"ok": True, "id": item["id"]}
 
         @app.post("/api/wake", status_code=202)
         async def wake_up() -> dict[str, bool]:

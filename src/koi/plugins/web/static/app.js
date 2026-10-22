@@ -16,6 +16,7 @@
     nudge: $("nudge"), wake: $("wakeBtn"),
     pinbar: $("pinbar"), pinbarText: $("pinbarText"), pinbarBtn: $("pinbarBtn"),
     form: $("composerForm"), input: $("input"), send: $("sendBtn"), count: $("count"),
+    pick: $("pickBtn"), file: $("fileInput"), attach: $("attachStrip"),
     brandName: $("brandName"), crumb: $("crumb"), viewTitle: $("viewTitle"),
     statusPill: $("statusPill"), statusText: $("statusText"),
     connBadge: $("connBadge"), connTextTop: $("connTextTop"),
@@ -54,6 +55,10 @@
   const MAX_MESSAGE = 4000;
   const MAX_SAMPLES = 120;
   const AWAIT_TIMEOUT = 45000;
+  const MAX_ATTACHMENTS = 4;
+  const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+  const MAX_IMAGE_EDGE = 1568;
+  const UPLOAD_TYPES = ["image/png", "image/jpeg", "image/webp"];
 
   let state = null;
   let es = null;
@@ -63,6 +68,9 @@
   let popEl = null;
   let lastAttentionSig = "";
   let started = false;
+  // 待发送的图片；上传成功后就记住 id，重试时不用再传
+  let attachments = [];
+  let sending = false;
 
   /* ------------------------------------------------------------------ text */
 
@@ -171,7 +179,8 @@
   }
 
   function fingerprint(message) {
-    return message.role + "|" + (message.time || "") + "|" + (message.text || "");
+    const images = (message.images || []).map((image) => image.id || image.url).join(",");
+    return message.role + "|" + (message.time || "") + "|" + (message.text || "") + "|" + images;
   }
 
   function messageKey(message) {
@@ -210,11 +219,16 @@
   // 头像加载失败（被删了、换成了坏文件）时退回池印。CSP 不允许内联 onerror，所以在捕获阶段统一处理
   document.addEventListener("error", (event) => {
     const target = event.target;
-    if (!(target instanceof HTMLImageElement) || !target.classList.contains("k-avatar-img")) return;
-    if (state.avatarBroken) return;
-    state.avatarBroken = true;
-    paintMedallions();
-    renderMessages();
+    if (!(target instanceof HTMLImageElement)) return;
+    if (target.classList.contains("k-avatar-img")) {
+      if (state.avatarBroken) return;
+      state.avatarBroken = true;
+      paintMedallions();
+      renderMessages();
+      return;
+    }
+    // 聊天里的图片没了（上传图被清理、人设图被删）就藏起来，不显示破图标
+    if (target.classList.contains("k-msg-img")) target.classList.add("is-broken");
   }, true);
 
   /* ------------------------------------------------------------------ API */
@@ -290,18 +304,137 @@
 
   function updateComposer() {
     const length = els.input.value.length;
+    const count = attachments.length;
     const sleeping = state.snapshot && state.snapshot.status === "sleeping";
     els.input.style.height = "auto";
     els.input.style.height = Math.min(els.input.scrollHeight, 130) + "px";
-    els.count.textContent = length + " / " + MAX_MESSAGE;
     els.count.classList.toggle("is-over", length > MAX_MESSAGE);
-    els.send.disabled = length === 0 || length > MAX_MESSAGE || !state.connected;
+    els.send.disabled = (!length && !count) || length > MAX_MESSAGE || !state.connected || sending;
     els.form.classList.toggle("is-off", !state.connected);
+    if (sending) {
+      els.count.textContent = "正在发送…";
+    } else if (count) {
+      els.count.textContent = length + " / " + MAX_MESSAGE + " · 图片 " + count + "/" + MAX_ATTACHMENTS;
+    } else {
+      els.count.textContent = length + " / " + MAX_MESSAGE;
+    }
     els.input.placeholder = !state.connected
       ? "还没连上她，正在重试…"
       : sleeping
         ? "她睡着了，消息会留给她醒来再看…"
         : "说点什么……";
+  }
+
+  /* ------------------------------------------------------------------ attachments */
+
+  function releaseImage(item) {
+    const url = item && (item.preview || item.url);
+    if (typeof url === "string" && url.indexOf("blob:") === 0) {
+      try { URL.revokeObjectURL(url); } catch (err) { /* ignore */ }
+    }
+  }
+
+  function renderAttachments() {
+    if (!els.attach) return;
+    els.attach.innerHTML = attachments.map((att, index) =>
+      '<figure class="k-attach-item">'
+        + '<img class="k-attach-img" src="' + esc(att.preview) + '" alt="' + esc(att.name || "图片") + '">'
+        + '<button class="k-attach-x" type="button" data-remove="' + index + '" aria-label="移除图片">'
+        + '<svg class="i"><use href="#i-x"/></svg></button>'
+        + "</figure>").join("");
+    els.attach.hidden = attachments.length === 0;
+    updateComposer();
+  }
+
+  async function prepareImage(file) {
+    const fallback = { blob: file, type: file.type, preview: URL.createObjectURL(file) };
+    if (typeof createImageBitmap !== "function") return fallback;
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    } catch (err) {
+      return fallback;
+    }
+    const width = bitmap.width || 1;
+    const height = bitmap.height || 1;
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(width, height));
+    // 小图原样上传；大图压到 1568px 长边，顺便去掉 EXIF
+    const keep = scale === 1 && file.size <= 1.5 * 1024 * 1024
+      && (file.type === "image/png" || file.type === "image/jpeg");
+    if (keep) {
+      if (bitmap.close) bitmap.close();
+      return fallback;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const paint = canvas.getContext("2d");
+    if (!paint) {
+      if (bitmap.close) bitmap.close();
+      return fallback;
+    }
+    paint.fillStyle = "#fff";
+    paint.fillRect(0, 0, canvas.width, canvas.height);
+    paint.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    if (bitmap.close) bitmap.close();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    if (!blob) return fallback;
+    // 压缩后的预览才是真正上传的东西，原来的大图预览不再需要
+    releaseImage(fallback);
+    return { blob: blob, type: "image/jpeg", preview: URL.createObjectURL(blob) };
+  }
+
+  async function addFiles(files) {
+    const list = Array.from(files || []);
+    for (const file of list) {
+      if (attachments.length >= MAX_ATTACHMENTS) {
+        toast("最多 " + MAX_ATTACHMENTS + " 张图片", "warn");
+        break;
+      }
+      if (!file || UPLOAD_TYPES.indexOf(file.type) < 0) {
+        toast("只支持 PNG、JPEG、WebP 图片：" + ((file && file.name) || ""), "warn");
+        continue;
+      }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        toast("图片太大（上限 5 MB）：" + (file.name || ""), "warn");
+        continue;
+      }
+      const prepared = await prepareImage(file);
+      if (attachments.length >= MAX_ATTACHMENTS) {
+        releaseImage(prepared);
+        toast("最多 " + MAX_ATTACHMENTS + " 张图片", "warn");
+        break;
+      }
+      attachments.push({
+        blob: prepared.blob,
+        type: prepared.type,
+        preview: prepared.preview,
+        name: file.name || "图片",
+        id: ""
+      });
+      renderAttachments();
+    }
+    if (list.length) els.input.focus();
+  }
+
+  function removeAttachment(index) {
+    const att = attachments[index];
+    if (!att) return;
+    releaseImage(att);
+    attachments.splice(index, 1);
+    renderAttachments();
+  }
+
+  async function uploadAttachment(att) {
+    if (att.id) return att.id;
+    const headers = {
+      "Content-Type": att.type || "application/octet-stream",
+      "X-Koi-Filename": encodeURIComponent(att.name || "图片")
+    };
+    const data = await api("/api/uploads", { method: "POST", headers: headers, body: att.blob });
+    if (!data || !data.id) throw new Error("上传没有返回图片 ID");
+    att.id = data.id;
+    return att.id;
   }
 
   function renderTop() {
@@ -458,6 +591,22 @@
       + '<div class="k-runrow"><i></i> 记忆 <span class="spacer"></span><code>' + diaries + " 篇日记 · " + notes + " 条待整理</code></div>";
   }
 
+  function imagesHTML(images) {
+    if (!images || !images.length) return "";
+    const items = images.map((image) =>
+      '<a class="k-msg-img-link" href="' + esc(image.url) + '" target="_blank" rel="noopener noreferrer" aria-label="打开图片">'
+        + '<img class="k-msg-img" src="' + esc(image.url) + '" alt="' + esc(image.alt || "图片")
+        + '" loading="lazy" draggable="false"></a>').join("");
+    return '<div class="k-msg-images' + (images.length === 1 ? " is-single" : "") + '">' + items + "</div>";
+  }
+
+  function bubbleHTML(message) {
+    const images = Array.isArray(message.images) ? message.images : [];
+    const text = message.text ? fmt(message.text) : "";
+    return '<div class="k-bubble' + (text ? "" : " images-only") + '">'
+      + text + imagesHTML(images) + "</div>";
+  }
+
   function messageHTML(message) {
     const time = timeOf(message.time);
     const mid = message.id ? ' data-msg-id="' + esc(message.id) + '"' : "";
@@ -479,7 +628,7 @@
       return '<div class="k-msg owner' + (message.pending ? " pending" : "") + (message.failed ? " failed" : "") + '"' + mid + ">"
         + '<div class="k-msg-main">'
         + '<div class="k-msg-name"><span>你</span><time>' + esc(time) + "</time></div>"
-        + '<div class="k-bubble">' + fmt(message.text) + "</div>"
+        + bubbleHTML(message)
         + status
         + "</div></div>";
     }
@@ -487,7 +636,7 @@
       + medallionHTML(29)
       + '<div class="k-msg-main">'
       + '<div class="k-msg-name"><b>' + esc(state.name) + "</b><time>" + esc(time) + "</time></div>"
-      + '<div class="k-bubble">' + fmt(message.text) + "</div>"
+      + bubbleHTML(message)
       + "</div></div>";
   }
 
@@ -1100,13 +1249,29 @@
     applyState(data);
   }
 
+  function normalizeImage(image) {
+    if (!image || typeof image.url !== "string" || image.url.indexOf("/api/") !== 0) return null;
+    return {
+      id: String(image.id || ""),
+      url: image.url,
+      media_type: String(image.media_type || ""),
+      sha256: String(image.sha256 || ""),
+      alt: String(image.alt || "图片")
+    };
+  }
+
   function normalizeMessage(message) {
     const role = message.role === "owner" || message.role === "koi" ? message.role : "system";
+    const images = Array.isArray(message.images)
+      ? message.images.map(normalizeImage).filter(Boolean).slice(0, MAX_ATTACHMENTS)
+      : [];
     return {
       id: message.id || "",
       role,
       text: String(message.text || ""),
-      time: message.time || new Date().toISOString()
+      time: message.time || new Date().toISOString(),
+      client_id: message.client_id ? String(message.client_id) : "",
+      images: images
     };
   }
 
@@ -1117,7 +1282,14 @@
     const server = list.map(normalizeMessage);
     const pending = state.messages.filter((message) => message.pending || message.failed);
     const serverOwner = new Set(server.filter((message) => message.role === "owner").map((message) => message.text));
-    const kept = pending.filter((message) => !(message.role === "owner" && serverOwner.has(message.text)));
+    const serverClients = new Set(
+      server.filter((message) => message.role === "owner" && message.client_id).map((message) => message.client_id)
+    );
+    const kept = pending.filter((message) => {
+      if (message.role !== "owner") return true;
+      if (message.client_id) return !serverClients.has(message.client_id);
+      return (message.images || []).length > 0 || !serverOwner.has(message.text);
+    });
     state.messages = server.concat(kept);
     state.seen = new Set(server.map(messageKey));
     state.historyHasMore = Boolean(data && data.has_more);
@@ -1324,10 +1496,13 @@
     };
   }
 
-  function findLocalOwner(text) {
+  function findLocalOwner(message) {
     for (let i = state.messages.length - 1; i >= 0; i -= 1) {
-      const message = state.messages[i];
-      if (message.role === "owner" && message.local && message.text === text) return message;
+      const local = state.messages[i];
+      if (local.role !== "owner" || !local.local) continue;
+      if (message.client_id && local.client_id === message.client_id) return local;
+      if (!message.client_id && !(message.images || []).length && !(local.images || []).length
+        && local.text === message.text) return local;
     }
     return null;
   }
@@ -1336,15 +1511,19 @@
     if (!raw || (raw.role !== "owner" && raw.role !== "koi" && raw.role !== "system")) return;
     const message = normalizeMessage(raw);
     if (message.role === "owner") {
-      const local = findLocalOwner(message.text);
+      const local = findLocalOwner(message);
       if (local) {
+        const previews = local.images || [];
         local.id = message.id || local.id;
         local.role = message.role;
         local.text = message.text;
         local.time = message.time;
+        local.client_id = message.client_id;
+        local.images = message.images;
         local.pending = false;
         local.failed = false;
         local.local = false;
+        previews.forEach(releaseImage);
         state.seen.add(messageKey(local));
         renderMessages();
         return;
@@ -1367,7 +1546,8 @@
       }
     }
     if (message.role !== "owner" && els.live) {
-      els.live.textContent = (message.role === "koi" ? state.name : "系统") + "：" + message.text;
+      els.live.textContent = (message.role === "koi" ? state.name : "系统") + "："
+        + (message.text || (message.images.length ? "[图片]" : ""));
     }
     renderMessages();
     if (message.role !== "owner") {
@@ -1388,26 +1568,48 @@
   }
 
   async function sendMessage() {
+    if (sending) return;
     const text = els.input.value.trim();
-    if (!text) return;
+    const ready = attachments.slice();
+    if (!text && !ready.length) return;
+    if (text.length > MAX_MESSAGE) return;
     if (!state.connected) {
       toast("还没连上她，消息没有发出去", "warn");
       return;
     }
-    if (text.length > MAX_MESSAGE) return;
-    els.input.value = "";
+    sending = true;
     updateComposer();
-    state.awaiting = true;
+    const ids = [];
+    try {
+      for (let i = 0; i < ready.length; i += 1) {
+        els.count.textContent = "上传 " + (i + 1) + " / " + ready.length + "…";
+        ids.push(await uploadAttachment(ready[i]));
+      }
+    } catch (err) {
+      sending = false;
+      updateComposer();
+      toast("图片没传上去：" + err.message, "warn");
+      return;
+    }
+    const clientId = "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
     const optimistic = {
       role: "owner", text: text, time: new Date().toISOString(),
-      pending: true, failed: false, local: true
+      pending: true, failed: false, local: true, client_id: clientId,
+      images: ready.map((att) => ({
+        id: att.id, url: att.preview, media_type: att.type, sha256: "", alt: att.name
+      }))
     };
+    els.input.value = "";
+    attachments = [];
+    updateComposer();
+    renderAttachments();
+    state.awaiting = true;
     state.messages.push(optimistic);
     renderMessages(true);
     try {
       await api("/api/messages", {
         method: "POST",
-        body: JSON.stringify({ text: text })
+        body: JSON.stringify({ text: text, images: ids, client_id: clientId })
       });
       optimistic.pending = false;
       renderMessages();
@@ -1416,12 +1618,16 @@
       optimistic.pending = false;
       optimistic.failed = true;
       state.awaiting = false;
-      if (!els.input.value) {
-        els.input.value = text;
-        updateComposer();
-      }
+      // 已经传上去的图片留着 id，重试时不必再传一遍
+      attachments = ready;
+      if (!els.input.value) els.input.value = text;
+      updateComposer();
+      renderAttachments();
       renderMessages();
       toast("没发出去：" + err.message, "warn");
+    } finally {
+      sending = false;
+      updateComposer();
     }
   }
 
@@ -1756,6 +1962,34 @@
     }
   });
 
+  els.pick.addEventListener("click", () => els.file.click());
+  els.file.addEventListener("change", () => {
+    addFiles(els.file.files);
+    els.file.value = "";
+  });
+  els.attach.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remove]");
+    if (button) removeAttachment(parseInt(button.dataset.remove, 10));
+  });
+  els.input.addEventListener("paste", (event) => {
+    const files = event.clipboardData && event.clipboardData.files;
+    if (files && files.length) addFiles(files);
+  });
+  ["dragenter", "dragover"].forEach((type) => {
+    els.form.addEventListener(type, (event) => {
+      event.preventDefault();
+      els.form.classList.add("is-drop");
+    });
+  });
+  ["dragleave", "dragend"].forEach((type) => {
+    els.form.addEventListener(type, () => els.form.classList.remove("is-drop"));
+  });
+  els.form.addEventListener("drop", (event) => {
+    event.preventDefault();
+    els.form.classList.remove("is-drop");
+    if (event.dataTransfer && event.dataTransfer.files) addFiles(event.dataTransfer.files);
+  });
+
   els.wake.addEventListener("click", async () => {
     els.wake.disabled = true;
     try {
@@ -1773,6 +2007,13 @@
   els.log.addEventListener("scroll", () => {
     els.jump.hidden = isNearBottom();
   });
+
+  // 图片是懒加载的，解码完会把消息顶高；本来就在底部附近时跟着滚到底
+  els.log.addEventListener("load", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLImageElement) || !target.classList.contains("k-msg-img")) return;
+    if (els.log.scrollHeight - els.log.scrollTop - els.log.clientHeight < 600) scrollBottom("auto");
+  }, true);
 
   els.attention.addEventListener("click", handleAttentionClick);
   els.attention.addEventListener("keydown", (event) => {

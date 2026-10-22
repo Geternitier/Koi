@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from koi.persona.profile import PersonaProfile
+from koi.protocol import sniff_image
 
 log = logging.getLogger(__name__)
 
@@ -48,18 +49,6 @@ class Appearance:
         return next((img for img in self.images if img.id == image_id), None)
 
 
-def sniff(data: bytes) -> str | None:
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    return None
-
-
 def resolve_file(base: Path, rel: str) -> Path | None:
     """rel 落在 base 里面时返回真实路径，否则返回 None。"""
     if not rel or Path(rel).is_absolute() or Path(rel).drive:
@@ -81,7 +70,7 @@ def _read(base: Path, rel: str) -> tuple[bytes, str] | None:
         log.warning("形象图片超过 %d MB，已跳过：%s", MAX_BYTES // 1024 // 1024, path)
         return None
     data = path.read_bytes()
-    media_type = sniff(data)
+    media_type = sniff_image(data)
     if media_type is None:
         log.warning("形象图片不是 PNG、JPEG、WebP 或 GIF，已跳过：%s", path)
         return None

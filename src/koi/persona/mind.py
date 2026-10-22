@@ -113,8 +113,10 @@ class WakeContext(BaseModel):
     event_people: list[str | None] = Field(default_factory=list)
     # 这次涉及的人
     people: list[PersonBrief] = Field(default_factory=list)
-    # 插件交给她看的画面。附在这一次表达的用户消息末尾，不进系统提示词
+    # 插件交给她看的画面，或主人消息里附的图片。附在这一次表达的用户消息末尾，不进系统提示词
     images: list[SeenImage] = Field(default_factory=list)
+    # 图片没能送到她眼前（模型不接受图片时降级），提示词里要说明
+    images_unavailable: bool = False
 
 
 class WakeOutcome(BaseModel):

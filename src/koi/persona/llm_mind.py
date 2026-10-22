@@ -1,6 +1,7 @@
 """LLM 驱动的 Mind。"""
 
 import base64
+import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any, Protocol, TypeVar
@@ -34,6 +35,15 @@ from koi.persona.prompt import (
 from koi.persona.will import RequestAssessment, WillDecision
 
 T = TypeVar("T", bound=BaseModel)
+# 这些状态码通常意味着模型不接受图片，而不是网络或鉴权问题
+IMAGE_REJECTED_STATUS = frozenset({400, 413, 415, 422})
+
+log = logging.getLogger(__name__)
+
+
+def _image_rejected(error: Exception) -> bool:
+    status = getattr(error, "status_code", None)
+    return isinstance(status, int) and status in IMAGE_REJECTED_STATUS
 
 
 class JsonLLM(Protocol):
@@ -93,13 +103,28 @@ class LLMMind:
         *,
         calm_threshold: float = 0.12,
         redact: Callable[[str], str] | None = None,
+        self_images: list[SeenImage] | None = None,
     ) -> None:
         self.llm = llm
         self.profile = profile
         self.params = params
         self.calm_threshold = calm_threshold
         self._redact = redact or (lambda s: s)
+        self._self_images = list(self_images or [])
         self._system = system_prompt(profile)
+        # 模型明确拒绝过图片后，这个进程不再附图，省得每次多一次失败的调用
+        self._vision_off = False
+
+    @staticmethod
+    def _append_image(parts: list[dict[str, Any]], image: SeenImage) -> None:
+        encoded = base64.b64encode(image.data).decode("ascii")
+        parts.append({"type": "text", "text": image.caption})
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{image.media_type};base64,{encoded}"},
+            }
+        )
 
     def _messages(self, user: str, images: list[SeenImage] | None = None) -> list[dict[str, Any]]:
         text = self._redact(user)
@@ -107,14 +132,17 @@ class LLMMind:
         if images:
             parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
             for image in images:
-                encoded = base64.b64encode(image.data).decode("ascii")
-                parts.append({"type": "text", "text": image.caption})
+                self._append_image(parts, image)
+            # 自己的登记图只在她看图时附上，用来对照照片里的人是不是自己
+            if self._self_images:
                 parts.append(
                     {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{image.media_type};base64,{encoded}"},
+                        "type": "text",
+                        "text": "下面是你自己的照片，用来对照前面照片里的人是不是你：",
                     }
                 )
+                for image in self._self_images:
+                    self._append_image(parts, image)
             content = parts
         return [
             {"role": "system", "content": self._system},
@@ -127,6 +155,28 @@ class LLMMind:
             p.energy_per_call
             + usage.completion_tokens / 1000 * p.energy_per_1k_output
             + usage.cache_miss_tokens / 1000 * p.energy_per_1k_uncached_prompt
+        )
+
+    async def _act(
+        self, ctx: WakeContext, decisions: list[WillDecision]
+    ) -> tuple[ActOutput, Usage]:
+        # 有图时用视觉模型；没配就和主模型相同
+        vision = bool(ctx.images and self.params.vision_model)
+        model = self.params.vision_model if vision else self.params.model
+        return await self.llm.chat_json(
+            self._messages(
+                act_prompt(
+                    ctx,
+                    decisions,
+                    self.profile,
+                    self.calm_threshold,
+                    max_tool_calls=self.params.max_tool_calls_per_round,
+                ),
+                ctx.images,
+            ),
+            ActOutput,
+            model=model,
+            temperature=self.params.act_temperature,
         )
 
     async def perceive(self, ctx: WakeContext) -> Perception:
@@ -146,21 +196,18 @@ class LLMMind:
         )
 
     async def act(self, ctx: WakeContext, decisions: list[WillDecision]) -> WakeOutcome:
-        out, usage = await self.llm.chat_json(
-            self._messages(
-                act_prompt(
-                    ctx,
-                    decisions,
-                    self.profile,
-                    self.calm_threshold,
-                    max_tool_calls=self.params.max_tool_calls_per_round,
-                ),
-                ctx.images,
-            ),
-            ActOutput,
-            model=self.params.model,
-            temperature=self.params.act_temperature,
-        )
+        effective = ctx
+        if self._vision_off and ctx.images:
+            effective = ctx.model_copy(update={"images": [], "images_unavailable": True})
+        try:
+            out, usage = await self._act(effective, decisions)
+        except Exception as e:
+            if not effective.images or not _image_rejected(e):
+                raise
+            log.warning("模型不接受图片，这次改成纯文本：%s", e)
+            self._vision_off = True
+            effective = ctx.model_copy(update={"images": [], "images_unavailable": True})
+            out, usage = await self._act(effective, decisions)
         alarms: list[AlarmRequest] = []
         if out.alarm is not None:
             at = out.alarm.at

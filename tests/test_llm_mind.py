@@ -8,9 +8,20 @@ from pydantic import BaseModel
 
 from koi.kernel import Event, EventBus, Priority, Scheduler, SimClock, Trust
 from koi.kernel.llm import Usage
-from koi.persona import Journal, Persona, PersonaParams, PersonaProfile, Status
+from koi.persona import (
+    Journal,
+    Persona,
+    PersonaParams,
+    PersonaProfile,
+    Status,
+    ToolCall,
+    ToolSpec,
+    WakeReason,
+)
 from koi.persona.llm_mind import ActOutput, LLMMind, PerceiveOutput
+from koi.persona.mind import SeenImage
 from koi.persona.params import AffectParams, SleepParams
+from koi.persona.prompt import system_prompt
 
 TZ = timezone(timedelta(hours=8))
 T0 = datetime(2026, 10, 20, 10, tzinfo=TZ)
@@ -233,3 +244,180 @@ async def test_alarm_from_act_output_is_scheduled():
     await sched.run_until(t + timedelta(seconds=1))
     (alarm,) = persona.state.alarms.values()
     assert alarm.at == datetime(2026, 10, 20, 15, tzinfo=TZ)
+
+
+class _ImageRejected(Exception):
+    status_code = 400
+
+
+class _VisionLLM:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+
+    async def chat_json(self, messages, schema, **kwargs):
+        self.calls.append((list(messages), kwargs))
+        if isinstance(messages[1]["content"], list):
+            raise _ImageRejected("image_url is not supported")
+        return schema.model_validate({"replies": []}), USAGE
+
+
+async def test_vision_rejection_falls_back_to_text_once():
+    clock = SimClock(T0)
+    llm = _VisionLLM()
+    mind = LLMMind(llm, PROFILE, PARAMS.mind)
+    persona = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=mind,
+        journal=Journal(),
+    )
+    ctx = persona._context(WakeReason.OWNER, [], [])
+    image = SeenImage(caption="一张图", media_type="image/png", data=b"\x89PNG\r\n\x1a\n")
+    ctx = ctx.model_copy(update={"images": [image]})
+
+    await mind.act(ctx, [])
+    assert len(llm.calls) == 2
+    assert isinstance(llm.calls[0][0][1]["content"], list)
+    assert isinstance(llm.calls[1][0][1]["content"], str)
+    assert "没能送到你眼前" in llm.calls[1][0][1]["content"]
+
+    # 记住模型不接受图片，下次不再附图
+    await mind.act(ctx, [])
+    assert len(llm.calls) == 3
+    assert isinstance(llm.calls[2][0][1]["content"], str)
+
+
+class _RecordingLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat_json(self, messages, schema, **kwargs):
+        self.calls.append(kwargs)
+        return schema.model_validate({"replies": []}), USAGE
+
+
+async def test_vision_model_is_used_only_with_images():
+    params = PARAMS.mind.model_copy(update={"model": "text-model", "vision_model": "vision-model"})
+    llm = _RecordingLLM()
+    mind = LLMMind(llm, PROFILE, params)
+    clock = SimClock(T0)
+    persona = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=mind,
+        journal=Journal(),
+    )
+    ctx = persona._context(WakeReason.OWNER, [], [])
+    image = SeenImage(caption="一张图", media_type="image/png", data=b"\x89PNG\r\n\x1a\n")
+    await mind.act(ctx.model_copy(update={"images": [image]}), [])
+    await mind.act(ctx, [])
+    assert llm.calls[0]["model"] == "vision-model"
+    assert llm.calls[1]["model"] == "text-model"
+
+
+def test_system_prompt_includes_appearance_and_identity_rules():
+    profile = PROFILE.model_copy(update={"appearance": "栗棕色长卷发，圆眼睛。"})
+    text = system_prompt(profile)
+    assert "# 你的样子" in text
+    assert "栗棕色长卷发" in text
+    assert "以主人说的为准" in text
+    assert "# 你的样子" not in system_prompt(PROFILE)
+
+
+class _MessageLLM:
+    def __init__(self) -> None:
+        self.messages: list[list[dict[str, Any]]] = []
+
+    async def chat_json(self, messages, schema, **kwargs):
+        self.messages.append(list(messages))
+        return schema.model_validate({"replies": []}), USAGE
+
+
+async def test_self_images_are_attached_only_when_looking_at_images():
+    llm = _MessageLLM()
+    portrait = SeenImage(
+        caption="这是你（头像）", media_type="image/png", data=b"\x89PNG\r\n\x1a\n"
+    )
+    mind = LLMMind(llm, PROFILE, PARAMS.mind, self_images=[portrait])
+    clock = SimClock(T0)
+    persona = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=mind,
+        journal=Journal(),
+    )
+    ctx = persona._context(WakeReason.OWNER, [], [])
+    image = SeenImage(caption="主人发来的图片", media_type="image/png", data=b"\x89PNG\r\n\x1a\n")
+    await mind.act(ctx.model_copy(update={"images": [image]}), [])
+    content = llm.messages[0][1]["content"]
+    assert isinstance(content, list)
+    texts = [part.get("text") for part in content if part.get("type") == "text"]
+    assert any("下面是你自己的照片" in text for text in texts)
+    assert sum(part.get("type") == "image_url" for part in content) == 2
+
+    # 没有新图片时不附自己的照片
+    await mind.act(ctx, [])
+    assert isinstance(llm.messages[1][1]["content"], str)
+
+
+async def test_tool_images_are_registered_and_replaced_with_ids():
+    async def actuator(plugin, capability, args):
+        return {"ok": True, "images": [{"path": "outputs/a.png", "caption": "画好的图"}]}
+
+    seen = []
+
+    def registrar(plugin, refs):
+        seen.append((plugin, refs))
+        return [("out-abc", "画好的图")]
+
+    clock = SimClock(T0)
+    persona = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=LLMMind(_MessageLLM(), PROFILE, PARAMS.mind),
+        journal=Journal(),
+        actuator=actuator,
+        image_registrar=registrar,
+    )
+    tools = [ToolSpec(name="comfy.generate")]
+    result = await persona._run_tool(ToolCall(tool="comfy.generate", args={"prompt": "猫"}), tools)
+    assert seen == [("comfy", [{"path": "outputs/a.png", "caption": "画好的图"}])]
+    assert '"id": "out-abc"' in result.result
+    assert "outputs/a.png" not in result.result
+
+    # 没有登记器时保持原样；登记失败时去掉 images，不把坏路径塞给她
+    plain = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=LLMMind(_MessageLLM(), PROFILE, PARAMS.mind),
+        journal=Journal(),
+        actuator=actuator,
+    )
+    raw = await plain._run_tool(ToolCall(tool="comfy.generate", args={}), tools)
+    assert "outputs/a.png" in raw.result
+
+    def boom(plugin, refs):
+        raise RuntimeError("坏图")
+
+    failing = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=LLMMind(_MessageLLM(), PROFILE, PARAMS.mind),
+        journal=Journal(),
+        actuator=actuator,
+        image_registrar=boom,
+    )
+    failed = await failing._run_tool(ToolCall(tool="comfy.generate", args={}), tools)
+    assert '"images"' not in failed.result

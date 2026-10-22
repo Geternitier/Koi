@@ -34,7 +34,6 @@ from koi.kernel.instance import (
 )
 from koi.kernel.interactions import InteractionService
 from koi.kernel.llm import LLMConfig, LLMGateway
-from koi.kernel.media import frame_caption
 from koi.kernel.paths import KoiPaths
 from koi.kernel.plugins import PluginHost
 from koi.kernel.process import PluginSpec, ProcessPlugin, load_specs
@@ -56,7 +55,7 @@ from koi.persona import (
     load_profile,
     templates,
 )
-from koi.persona.appearance import Image, load_appearance
+from koi.persona.appearance import Appearance, Image, load_appearance
 from koi.persona.core import STATE_KEY
 from koi.persona.llm_mind import LLMMind
 from koi.persona.mind import SeenImage
@@ -123,6 +122,35 @@ def harness_spec(instance: Instance, registry: Registry) -> PluginSpec:
         settings=settings,
         cwd=str(paths.workspace),
     )
+
+
+# 带图时附给她的自己的照片，单张不超过这个大小（大图 base64 太重）
+SELF_IMAGE_MAX_BYTES = 300_000
+
+
+def self_portraits(appearance: Appearance, limit: int) -> list[SeenImage]:
+    """她看图时附上的自己的照片：头像优先，再按顺序补参考图。"""
+    count = max(0, limit)
+    if count == 0:
+        return []
+    chosen: list[SeenImage] = []
+    candidates: list[Image] = []
+    if appearance.avatar is not None:
+        candidates.append(appearance.avatar)
+    candidates.extend(appearance.images)
+    for image in candidates:
+        if len(chosen) >= count:
+            break
+        if len(image.data) > SELF_IMAGE_MAX_BYTES:
+            continue
+        chosen.append(
+            SeenImage(
+                caption=f"这是你（{image.caption or image.id}）",
+                media_type=image.media_type,
+                data=image.data,
+            )
+        )
+    return chosen
 
 
 def setup_logging(paths: KoiPaths, redactor: Redactor, verbose: bool) -> None:
@@ -253,7 +281,15 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         secrets=secrets,
         redactor=redactor,
     )
-    host.add(WebPlugin(port=port, history_path=paths.data / "web" / "history.jsonl"))
+    host.add(
+        WebPlugin(
+            port=port,
+            history_path=paths.data / "web" / "history.jsonl",
+            image_dir=paths.data / "web" / "images",
+        )
+    )
+    # 上传的图片放在 data/web/images，事件里只带相对这个目录的路径
+    host.set_work_dir("web", paths.data / "web")
     env = scrubbed_env(secrets)
     specs = load_specs(paths.plugins)
     if instance.config.harness and not args.no_harness:
@@ -261,16 +297,31 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
     for spec in specs:
         host.add(ProcessPlugin(spec, env=env))
 
+    def sendable() -> list[tuple[str, str]]:
+        """她的形象图清单；工具产出的 out-… 由核心登记，通过工具结果给 ID。"""
+        items = [("avatar", "头像")] if appearance.avatar else []
+        return items + [(img.id, img.caption or img.id) for img in appearance.images]
+
     def toolbox() -> list[ToolSpec]:
-        return [
-            ToolSpec(
-                name=f"{pid}.{c.name}",
-                description=c.description,
-                parameters=c.parameters,
-                energy_cost=c.energy_cost,
+        images = sendable()
+        specs: list[ToolSpec] = []
+        for pid, c in host.tools():
+            params = dict(c.parameters)
+            if pid == "web" and c.name == "send_image":
+                hint = "工具结果里给你的 out-… 图片 ID"
+                if images:
+                    hint = "图片 ID：" + "、".join(f"{i}（{cap}）" for i, cap in images)
+                    hint += "，或工具结果里的 out-…"
+                params["image"] = hint
+            specs.append(
+                ToolSpec(
+                    name=f"{pid}.{c.name}",
+                    description=c.description,
+                    parameters=params,
+                    energy_cost=c.energy_cost,
+                )
             )
-            for pid, c in host.tools()
-        ]
+        return specs
 
     journal = Journal(paths.memory / "episodes")
     journal.load(clock.now())
@@ -280,6 +331,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         params.mind,
         calm_threshold=params.affect.calm_threshold,
         redact=redactor,
+        self_images=self_portraits(appearance, params.mind.self_ref_images),
     )
     persona = Persona(
         params,
@@ -295,10 +347,11 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         tools=toolbox,
         owner_call=profile.owner_call,
         people=People(paths.memory / "people", owner_call=profile.owner_call),
-        media_loader=lambda plugin_id, frames: [
-            SeenImage(caption=frame_caption(t), data=data)
-            for t, data in host.load_frames(plugin_id, frames)
+        media_loader=lambda plugin_id, refs: [
+            SeenImage(caption=caption, media_type=media_type, data=data)
+            for caption, media_type, data in host.load_images(plugin_id, refs)
         ],
+        image_registrar=host.register_images,
     )
 
     def _iso(value: datetime | None) -> str | None:
@@ -406,7 +459,10 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
 
     def image(image_id: str) -> ImageData | None:
         img = appearance.get(image_id)
-        return ImageData(info=image_info(img), data=img.data) if img is not None else None
+        if img is not None:
+            return ImageData(info=image_info(img), data=img.data)
+        # 工具产出的图（out-…）由插件宿主登记
+        return host.get_image(image_id)
 
     host.set_state_provider(state)
     host.set_memory_provider(memory_view)

@@ -152,9 +152,9 @@ class MemorySnapshot(BaseModel):
 
 
 class ImageInfo(BaseModel):
-    # avatar，或参考图 ref-1、ref-2……
+    # avatar、参考图 ref-1、ref-2……，或工具产出的 out-…
     id: str
-    kind: Literal["avatar", "reference"]
+    kind: Literal["avatar", "reference", "generated"]
     caption: str = ""
     media_type: str
     # 内容的 SHA-256，图片换了它就变，可以当缓存版本号
@@ -177,6 +177,29 @@ class MediaFrame(BaseModel):
     path: str
     # 在视频里的秒数，核心换成「第 N 秒」给她看
     t: float = 0.0
+    # 给她看的说明，例如「画好的图」；为空时按 t 生成时间点
+    caption: str = ""
+
+
+class ImageRef(BaseModel):
+    """事件 payload 里的一张图片。path 相对插件工作目录，字节不进入事件。"""
+
+    path: str
+    # 给她看的说明，例如「主人发来的图片（cat.jpg）」
+    caption: str = ""
+
+
+def sniff_image(data: bytes) -> str | None:
+    """按文件头判断图片类型，不看扩展名。SVG 能带脚本，不在识别范围内。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return None
 
 
 class ImageData(BaseModel):
@@ -311,6 +334,7 @@ __all__ = [
     "EventIn",
     "ImageData",
     "ImageInfo",
+    "ImageRef",
     "Interaction",
     "InteractionField",
     "InteractionKind",
@@ -324,4 +348,5 @@ __all__ = [
     "PluginContext",
     "SharedDiary",
     "TrustLevel",
+    "sniff_image",
 ]

@@ -586,6 +586,10 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 
 两次调用的 system 消息相同，用户消息按"最近的经历 → 新事件 → 此刻 → 尚未答应的请求 → 任务"排列。经历和事件变化最慢，放在最前面，以命中 DeepSeek 的前缀缓存（实测命中率约 80%）。LLM 的精力消耗为：每次调用 0.12，每 1k 输出 token 0.35，每 1k 未命中缓存的 prompt token 0.06，再乘心情倍率（§4.3），计入疲劳。
 
+**看图**。主人消息里的 `payload.images` 和插件的画面都在下一次 `act` 时读成 `SeenImage`，以 `image_url` 的 data URL 附在用户消息末尾，并在提示词里加「# 你看见的图片」。有图时用 `mind.vision_model`（留空即主模型）；模型以 400/413/415/422 拒绝图片时，改用纯文本重试一次并记住，提示词里说明这次图片没送到，避免把整轮思考弄崩。
+
+**认出自己**。`profile.md` 的 `appearance` 会写进 system prompt 的「# 你的样子」，让她知道自己长什么样，并约定：对得上才认、拿不准就说不确定、主人说是她就以主人为准。带图时再把她自己登记的图片附在主人图片之后，用一句「下面是你自己的照片」隔开，让视觉模型直接对照。张数由 `mind.self_ref_images` 控制（默认 1，含头像），超过 300 KB 的参考图不附，避免每次看图都传一张大图。这样照片里的她能被认出来；更严格的置信度判断（单独一次视觉调用）留到需要时再加。
+
 **意愿分档**（`will.py`）的判定顺序：
 
 | 顺序 | 条件 | 档位 | 账本 |
@@ -621,7 +625,10 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 | 接口 | 作用 |
 |---|---|
 | `GET /` | 单页聊天界面，侧栏显示状态、心情、精力、好感、内心想法、LLM 调用次数和缓存命中率 |
-| `POST /api/messages` | 主人发消息，返回 202，产生 P2、owner 信任的 `owner_message` 事件；有急事字样时由核心升为 P1 |
+| `POST /api/messages` | 主人发消息，可带最多 4 张已上传图片的 ID，返回 202，产生 P2、owner 信任的 `owner_message` 事件；有急事字样时由核心升为 P1；带图时不参与验证码截获 |
+| `POST /api/uploads` | 上传图片（原始字节，PNG/JPEG/WebP，≤5 MB），存到 `data/web/images/<id>`，返回 ID 与本机地址 |
+| `GET /api/uploads/{id}` | 回读上传的图片，带 ETag 和私有长缓存 |
+| `GET /api/images/{id}` | 她已经登记的图片（形象图；以后工具产出的图也走这里），供 `send_image` 和页面显示 |
 | `POST /api/wake` | 叫醒按钮，产生 P0 的 `wake_up` 事件 |
 | `GET /api/stream` | SSE 推送回复（消息带稳定 `id`）和 `state` 命名事件；无事件时每 20 秒保活 |
 | `GET /api/history` | 最近 200 条对话，持久化在 `data/web/history.jsonl`，重启后仍在；`limit` 默认 60，`before=<id>` 向前翻页，返回 `messages`、`has_more`、`next_before` |
@@ -635,6 +642,10 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 除了检查客户端地址，还检查 `Host` 头必须是 `127.0.0.1`、`::1` 或 `localhost`，防止 DNS 重绑定：恶意网页把自己的域名解析到 127.0.0.1 后，浏览器发来的 Host 仍是它的域名。界面侧栏有"等你批准"卡片（批准 / 拒绝按钮）和可折叠的"操作记录"。
 
 `GET /api/memory` 需要 `owner_ui` 权限，且核心侧的 `mind.share_memory` 默认关闭：关闭时只返回日记与待整理的数量，打开后才返回最近 10 篇日记正文（单篇截断到约 1500 字）和笔记本。日记正文只进入主人界面，不会写进事件、日志或审计。
+
+**图片消息**：事件里的 `payload.images` 只有工作目录内的相对路径和说明（例如 `{"path": "images/<id>.png", "caption": "主人发来的图片（cat.jpg）"}`），字节留在 `data/web/images/`，不进事件、历史、经历记录和日记；历史与 SSE 里只有 `{id, url, media_type, sha256, alt}`。核心在下次思考时按插件工作目录读取并校验（PNG/JPEG/WebP，单张 ≤5 MiB），坏路径或坏文件跳过。她发图用 `web.send_image` 能力（`tool=True`，参数 `image`、`caption`）：`image` 是核心登记的不透明 ID，目前是 `avatar`、`ref-*`，工具产出的图也会登记成 `out-<sha>`（见下）。Web 侧不用改。
+
+**工具产出的图片**：工具结果可以带 `images: [{"path": "outputs/1.png", "caption": "画好的图"}]`（路径相对插件工作目录）。`Persona._run_tool` 调 `PluginHost.register_images` 读图、按 SHA-256 登记成 `out-<sha12>`，把结果改写成 `images: [{id, caption}]`；`ctx.image` 先查形象图、再查共享图。她在同一轮里就能用 `web.send_image` 把这些 ID 发到网页；历史里仍然只有 `{id, url, media_type, sha256, alt}`。共享图只记在内存里，Koi 重启后旧 ID 失效；插件清理输出文件后也可能 404，前端会隐藏坏图。
 
 启动：`koi run [DIR] [--port N] [--model deepseek-chat] [--no-harness] [-v]`（见 §6.10），然后打开界面。API key 从用户变量 `CHAT_DEEPSEEK` 读取，日志经 `RedactingFilter` 脱敏。
 
@@ -657,7 +668,7 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 | | `koi/interaction/request`、`update`、`close` | 请主人扫码、填写（需要 `interact` 权限），见下文"交互请求" |
 | | `koi/interactions`、`koi/interaction/submit`、`cancel` | 展示和提交交互请求（需要 `owner_ui` 权限，目前只有 Web 插件有） |
 | | `koi/secret/get`、`set`、`delete` | 读写自己的凭据（名字须在核心侧配置的 `secrets` 里） |
-| | `koi/media` | 提交她刚看见的画面：说明、工作目录内的 JPEG 相对路径、精力消耗。事件只存路径；下一次思考再读文件 |
+| | `koi/media` | 提交她刚看见的画面：说明、工作目录内的 JPEG 相对路径、可选的 caption、精力消耗。事件只存路径和说明；下一次思考再读文件 |
 | 核心 → 插件 | `koi/interaction/changed`（通知） | 交互请求有了结果：主人填写的值、取消或过期 |
 
 **监管**（`koi.kernel.process.ProcessPlugin`）：
@@ -816,6 +827,9 @@ koi list                              # 本机所有实例及是否在运行
     diary/2026/10/20.md
     notes/notebook.md  notes/inbox.md
     people/<id>.md              # 人物档案；owner.md 是主人，其余按「插件-平台用户ID」命名
+  web/
+    history.jsonl               # 最近 200 条网页对话
+    images/<id>.<ext>           # 主人发来的图片；同名 .json 记文件名、类型、哈希
 <workspace_dir>/                # Harness 默认工作目录
 <plugins_dir>/<id>/manifest.yaml
 ```
