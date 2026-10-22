@@ -4,6 +4,8 @@
 2. 核心据此更新心情、对请求做出意愿决定、激活相关日记；
 3. act：在决定的约束下思考并表达（回复、自主活动、闹钟、调用工具）。
    act 请求了工具时，核心执行后把结果放进 tool_results，再调用一次 act，直到不再调用工具。
+   act 认为还有信息没说完（more）时，核心把已说的话放进 said，再调用一次 act，
+   把剩下的内容拆成后面几条消息；轮数、精力和心情由核心封顶。
 
 没有新事件时（如自主醒来）跳过 perceive。入睡时由核心收集当天经历，
 交给 consolidate 写日记、提炼笔记；写入与激活规则都由核心负责。
@@ -89,6 +91,8 @@ class WakeOutcome(BaseModel):
     engaged: bool = False
     alarms: list[AlarmRequest] = Field(default_factory=list)
     replies: list[Reply] = Field(default_factory=list)
+    # 这一拍发完后还要接着说，把没说完的信息放到后面几条里
+    more: bool = False
     thought: str | None = None
     activity: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)

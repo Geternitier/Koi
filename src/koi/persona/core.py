@@ -16,7 +16,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from koi.kernel.bus import Event, EventBus, Priority, Trust
-from koi.kernel.clock import Clock, hours_between
+from koi.kernel.clock import Clock, SimClock, hours_between
 from koi.kernel.scheduler import Scheduler
 from koi.kernel.store import Store
 from koi.persona.affect import (
@@ -69,6 +69,9 @@ WAKE_TEXT = {
     WakeReason.SELF: "半夜醒了",
     WakeReason.DISTURBED: "被消息吵醒了",
 }
+
+# 这些档位下只说完这一拍，不再往下续
+_SPEECH_BLOCKED = frozenset({"bargain", "refuse", "reluctant", "stop"})
 
 DECISION_TEXT = {
     "eager": "答应了「{intent}」",
@@ -554,25 +557,58 @@ class Persona:
         self.last_decisions = decisions
 
         mp = self.params.mind
-        rounds = 0
-        while outcome.tool_calls and ctx.tools:
-            if rounds >= mp.max_tool_rounds:
-                self._journal(self.clock.now(), "activity", "工具用了太多轮，先停下了")
-                break
-            rounds += 1
+        tool_rounds = 0
+        speech_rounds = 0
+        while True:
             await self._dispatch(ctx, outcome)
-            calls = outcome.tool_calls[: mp.max_tool_calls_per_round]
-            results = [await self._run_tool(c, ctx.tools) for c in calls]
             said = [r.text for r in outcome.replies if r.text.strip()]
-            ctx = ctx.model_copy(
-                update={
-                    "tool_results": [*ctx.tool_results, *results],
-                    "said": [*ctx.said, *said],
-                }
-            )
-            outcome = await self.mind.act(ctx, decisions)
-            self._apply_effects(outcome)
-        await self._dispatch(ctx, outcome)
+            if outcome.tool_calls and ctx.tools:
+                if tool_rounds >= mp.max_tool_rounds:
+                    self._journal(self.clock.now(), "activity", "工具用了太多轮，先停下了")
+                else:
+                    tool_rounds += 1
+                    calls = outcome.tool_calls[: mp.max_tool_calls_per_round]
+                    results = [await self._run_tool(c, ctx.tools) for c in calls]
+                    ctx = ctx.model_copy(
+                        update={
+                            "tool_results": [*ctx.tool_results, *results],
+                            "said": [*ctx.said, *said],
+                        }
+                    )
+                    outcome = await self.mind.act(ctx, decisions)
+                    self._apply_effects(outcome)
+                    continue
+            if (
+                outcome.more
+                and self._speech_allowed(reason, decisions)
+                and not self._owner_waiting()
+            ):
+                if speech_rounds >= mp.max_speech_rounds:
+                    self._journal(self.clock.now(), "activity", "还有话没说完，先停一下")
+                else:
+                    speech_rounds += 1
+                    ctx = ctx.model_copy(update={"said": [*ctx.said, *said]})
+                    outcome = await self.mind.act(ctx, decisions)
+                    self._apply_effects(outcome)
+                    # 下一拍生成期间主人又说话了：丢掉还没出口的话，回头先听
+                    if self._owner_waiting():
+                        break
+                    continue
+            break
+
+    def _speech_allowed(self, reason: WakeReason, decisions: list[WillDecision]) -> bool:
+        """续说只发生在聊天里，用来把信息拆开。自主苏醒、拒绝和坏心情都不续。"""
+        if reason == WakeReason.AUTONOMOUS:
+            return False
+        if any(d.tier in _SPEECH_BLOCKED for d in decisions):
+            return False
+        mp = self.params.mind
+        if self.energy < mp.continue_min_energy:
+            return False
+        return self.state.affect.emotion_v >= mp.continue_min_valence
+
+    def _owner_waiting(self) -> bool:
+        return any(e.trust == Trust.OWNER or is_owner_action(e) for e in self._inbox)
 
     def _update_owner_task(self, events: list[Event], decisions: list[WillDecision]) -> None:
         st = self.state
@@ -799,9 +835,13 @@ class Persona:
             self._journal(now, "thought", outcome.thought)
         if outcome.activity:
             self._journal(now, "activity", outcome.activity)
+        pending_pause = False
         for reply in outcome.replies:
             if not reply.text.strip():
                 continue
+            if pending_pause:
+                await self._pause_between(reply.text)
+            pending_pause = True
             target: Event | None = None
             if reply.event is not None and 1 <= reply.event <= len(ctx.events):
                 target = ctx.events[reply.event - 1]
@@ -819,6 +859,13 @@ class Persona:
             if target is not None and target.source == plugin:
                 args.update(_reply_route(target))
             await self._actuate(plugin, "send_message", args)
+
+    async def _pause_between(self, text: str) -> None:
+        """同一拍里的几条消息隔开一点。模拟时钟直接跳过，测试不必等墙钟。"""
+        if isinstance(self.clock, SimClock):
+            return
+        seconds = min(2.0, 0.25 + len(text) * 0.03)
+        await asyncio.sleep(seconds)
 
     async def _actuate(self, plugin: str, capability: str, args: dict[str, Any]) -> None:
         if self.actuator is None:

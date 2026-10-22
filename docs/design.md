@@ -166,7 +166,12 @@ Shell 命令的工作目录设为 workspace，但它实际会访问哪些文件�
 | 白名单自动（默认） | 白名单内的只读类命令（如 `ls`、`dir`、`git status`）自动执行，其余需审批 |
 | 信任模式 | 全部自动执行，只做审计 |
 
-命令执行时必须显式标注目标 Shell：Windows 为 PowerShell，macOS 为 zsh/bash。
+另外两个开关，默认关闭，写在 Harness 的 `settings.yaml` 里。打开后直接执行，仍记审计，不逐次批准：
+
+- `web_search`：提供 `web_search` 工具，用 DuckDuckGo 返回若干条标题、链接和摘要。不提供按网址打开网页。
+- `workspace_practice`：没有外壳元字符、路径参数都在工作区里、而且命令名不是 `curl`、`pip`、`npm`、`git`、`ssh` 这类联网程序时，直接执行。工作区外和联网命令仍按上面的策略。
+
+工作区里的脚本自己再去访问网络或读取别处，静态检查看不出来。黑名单路径在命令里出现时直接拒绝。命令执行时必须显式标注目标 Shell：Windows 为 PowerShell，macOS 为 zsh/bash。
 
 **4. 来源限制**
 
@@ -501,7 +506,9 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 
 1. `perceive`（温度 0.3）：对每个事件输出 appraisal（离散标签，由 `INTENSITY` 等表换算），并从主人消息里识别请求：`intent`、`same_as`（匹配账本中尚未答应的条目）、`kind`（request/stop）、`aversion`、`insistence`。
 2. 核心用 appraisal 更新心情和好感，再用 `will.decide` 对每个请求确定性地给出档位。
-3. `act`（温度 1.0）：把档位和主要原因写进 prompt 的"# 你的决定"，LLM 只输出 `thought / replies / activity / engaged / feeling / alarm`。
+3. `act`（温度 1.0）：把档位和主要原因写进 prompt 的"# 你的决定"，LLM 只输出 `thought / replies / more / activity / engaged / feeling / alarm`。
+
+**连续表达**。`more` 为真时，核心先把这一拍发出去，把已经说过的话放进「这次你已经说过的话」，再调用一次 `act`，用来把一段信息拆成多条消息；答应陪聊时也可以接着起一个话题。第一拍之后最多再开口 `max_speech_rounds` 次（默认 3）。下面的情况不再续：自主苏醒、档位是讨价还价 / 拒绝 / 不情愿 / 停下、精力低于 `continue_min_energy`（默认 25）、效价低于 `continue_min_valence`（默认 −0.2）、或者主人在这一拍生成期间又发来了消息（还没出口的下一拍丢掉）。续说算对当前消息的回应，不刷新主动开口的 2 小时间隔。
 
 两次调用的 system 消息相同，用户消息按"最近的经历 → 新事件 → 此刻 → 尚未答应的请求 → 任务"排列。经历和事件变化最慢，放在最前面，以命中 DeepSeek 的前缀缓存（实测命中率约 80%）。LLM 的精力消耗为：每次调用 0.4，每 1k 输出 token 1.0，每 1k 未命中缓存的 prompt token 0.2，计入疲劳。
 
