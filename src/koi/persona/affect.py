@@ -117,8 +117,10 @@ def apply_impulse(state: AffectState, dv: float, da: float) -> AffectState:
     )
 
 
-def apply_appraisal(state: AffectState, appraisal: Appraisal, p: AffectParams) -> AffectState:
-    mag = INTENSITY[appraisal.intensity]
+def apply_appraisal(
+    state: AffectState, appraisal: Appraisal, p: AffectParams, scale: float = 1.0
+) -> AffectState:
+    mag = INTENSITY[appraisal.intensity] * scale
     if appraisal.valence == "positive":
         dv = mag * p.sensitivity_positive
     elif appraisal.valence == "negative":

@@ -8,11 +8,11 @@
    把剩下的内容拆成后面几条消息；轮数、精力和心情由核心封顶。
 
 没有新事件时（如自主醒来）跳过 perceive。入睡时由核心收集当天经历，
-交给 consolidate 写日记、提炼笔记；写入与激活规则都由核心负责。
+交给 consolidate 写日记、提炼笔记、更新对打过交道的人的印象；写入与激活规则都由核心负责。
 """
 
 from datetime import date, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -20,12 +20,27 @@ from koi.kernel.bus import Event
 from koi.persona.affect import Appraisal
 from koi.persona.journal import JournalEntry
 from koi.persona.memory import Diary, Importance, MemoryView
+from koi.persona.people import PersonBrief, PersonUpdate
 from koi.persona.state import Snapshot, WakeReason
 from koi.persona.will import RequestAssessment, WillDecision, WillEntry
 
 
 class EventAppraisal(Appraisal):
     event: int
+    # 这件事让她对发消息的人更亲近还是更疏远。转述坏消息不等于惹她不快，所以和 valence 分开
+    regard: Literal["warmer", "neutral", "colder"] | None = None
+
+    @property
+    def toward_sender(self) -> Literal["positive", "neutral", "negative"]:
+        match self.regard:
+            case None:
+                return self.valence
+            case "warmer":
+                return "positive"
+            case "colder":
+                return "negative"
+            case _:
+                return "neutral"
 
 
 class Perception(BaseModel):
@@ -81,6 +96,10 @@ class WakeContext(BaseModel):
     tool_results: list[ToolResult] = Field(default_factory=list)
     # 用工具的过程中已经发出去的话
     said: list[str] = Field(default_factory=list)
+    # 每个新事件来自谁（人物档案 ID，与 events 对齐；认不出是谁时为 None）
+    event_people: list[str | None] = Field(default_factory=list)
+    # 这次涉及的人
+    people: list[PersonBrief] = Field(default_factory=list)
 
 
 class WakeOutcome(BaseModel):
@@ -107,6 +126,8 @@ class ConsolidationInput(BaseModel):
     notes: list[str] = Field(default_factory=list)
     mood_label: str = ""
     can_mark_important: bool = True
+    # 这一天打过交道的人，可以更新对他们的印象
+    people: list[PersonBrief] = Field(default_factory=list)
 
 
 class DiaryDraft(BaseModel):
@@ -120,6 +141,7 @@ class DiaryDraft(BaseModel):
 class Consolidation(BaseModel):
     diary: DiaryDraft | None = None
     notes: list[str] = Field(default_factory=list)
+    people: list[PersonUpdate] = Field(default_factory=list)
 
 
 class Mind(Protocol):

@@ -41,6 +41,18 @@ from koi.persona.mind import (
     WakeOutcome,
 )
 from koi.persona.params import PersonaParams
+from koi.persona.people import (
+    OWNER_ID,
+    People,
+    PersonBrief,
+    account_key,
+    advance_relation,
+    feel_about,
+    impact_scale,
+    new_relation,
+    record_contact,
+    settle_bond,
+)
 from koi.persona.sleep import (
     base_energy,
     clamp,
@@ -146,6 +158,7 @@ class Persona:
         actuator: Actuator | None = None,
         tools: Toolbox | None = None,
         owner_call: str = "主人",
+        people: People | None = None,
     ) -> None:
         self.params = params
         self.clock = clock
@@ -159,6 +172,7 @@ class Persona:
         self.actuator = actuator
         self.toolbox = tools
         self.owner_call = owner_call
+        self.people = people or People(owner_call=owner_call)
         self._ref_offset = reference_mid_sleep_offset(params.sleep)
         self.state = state or self._initial_state()
         self._lock = asyncio.Lock()
@@ -221,9 +235,16 @@ class Persona:
             backoff=st.backoff,
             circadian_peak_hour=st.circadian_peak_hour,
             owner_affinity=st.owner_affinity,
+            owner_bond=self.owner_bond,
             last_owner_at=st.last_owner_at,
             pending_events=len(self.bus.pending),
         )
+
+    @property
+    def owner_bond(self) -> float:
+        """对主人的长期感情。近期好感随时间回到这里。"""
+        bond = self.state.owner_bond
+        return self.params.will.affinity_baseline if bond is None else bond
 
     @property
     def expected_mid_sleep_hour(self) -> float:
@@ -303,6 +324,7 @@ class Persona:
             moods = self.state.memory.day_moods
             for d in [d for d in moods if d < cutoff]:
                 del moods[d]
+            self._forget_people(now)
             self._save()
         self._schedule_daily()
 
@@ -377,7 +399,7 @@ class Persona:
                 st.memory.day_moods.setdefault(day, DayMood()).add(
                     st.affect.emotion_v, st.affect.emotion_a, h
                 )
-            base = self.params.will.affinity_baseline
+            base = self.owner_bond
             st.owner_affinity = base + (st.owner_affinity - base) * 0.5 ** (
                 h / self.params.will.affinity_half_life_h
             )
@@ -533,12 +555,13 @@ class Persona:
 
     async def _think_once(self, reason: WakeReason, events: list[Event]) -> None:
         """评估 → 意愿决定 → 回忆 → 表达（→ 用工具 → 看结果 → 再表达……）。"""
-        ctx = self._context(reason, events)
-        self._journal_events(events)
+        event_people = self._meet(events)
+        ctx = self._context(reason, events, event_people)
+        self._journal_events(events, event_people)
 
         perception = await self.mind.perceive(ctx) if events else Perception()
         self.state.fatigue += max(0.0, perception.energy_cost)
-        self._apply_event_appraisals(events, perception.appraisals)
+        self._apply_event_appraisals(events, event_people, perception.appraisals)
         decisions = self._decide(events, perception.requests)
         self._update_owner_task(events, decisions)
         self._recall(perception.recall, ctx.memory)
@@ -549,6 +572,7 @@ class Persona:
                 "snapshot": self.snapshot(),
                 "memory": self._memory_view(now),
                 "tools": self._available_tools(now),
+                "people": self._briefs(events, event_people),
             }
         )
         outcome = await self.mind.act(ctx, decisions)
@@ -649,7 +673,9 @@ class Persona:
         self._journal(self.clock.now(), "tool", f"{call.tool} {args}：{'成功' if ok else '失败'}")
         return ToolResult(tool=call.tool, args=call.args, ok=ok, result=text)
 
-    def _context(self, reason: WakeReason, events: list[Event]) -> WakeContext:
+    def _context(
+        self, reason: WakeReason, events: list[Event], event_people: list[str | None]
+    ) -> WakeContext:
         st = self.state
         now = self.clock.now()
         last = st.last_proactive_at
@@ -666,6 +692,8 @@ class Persona:
             open_requests=list(st.will_ledger.values()),
             proactive_allowed=proactive,
             memory=self._memory_view(now),
+            event_people=event_people,
+            people=self._briefs(events, event_people),
         )
 
     def _recent_journal(self) -> list[JournalEntry]:
@@ -677,6 +705,135 @@ class Persona:
         fresh = sum(1 for e in entries if e.time > cut)
         n = max(fresh, self.params.memory.journal_min_entries)
         return entries[-n:] if n > 0 else []
+
+    # ------------------------------------------------------------------ 人际关系
+
+    def _meet(self, events: list[Event]) -> list[str | None]:
+        """认出每个事件来自谁，记一次来往。
+
+        主人只按信任级别认；其他人只按「插件:平台用户 ID」认，不看昵称。
+        没有 sender_id 的（合并后的群消息、动态流）不算和某个人打交道。
+        """
+        now = self.clock.now()
+        today = self.today(now)
+        pp = self.params.people
+        out: list[str | None] = []
+        for e in events:
+            if e.trust == Trust.OWNER:
+                out.append(OWNER_ID)
+                continue
+            key = None
+            if not e.source.startswith(CORE_SOURCE_PREFIX) and e.trust != Trust.SYSTEM:
+                key = account_key(e.source, e.payload.get("sender_id"))
+            if key is None:
+                out.append(None)
+                continue
+            name = e.payload.get("sender_name") or e.payload.get("sender") or ""
+            card = self.people.meet(key, str(name), today)
+            known = e.trust == Trust.KNOWN
+            rel = self.state.people.get(card.id)
+            if rel is None:
+                rel = self.state.people[card.id] = new_relation(now, known=known, p=pp)
+            record_contact(rel, now, known=known, p=pp)
+            out.append(card.id)
+        return out
+
+    def _brief(self, person_id: str, now: datetime, shown_as: list[str]) -> PersonBrief | None:
+        card = self.people.card(person_id)
+        if card is None:
+            return None
+        if person_id == OWNER_ID:
+            return PersonBrief(
+                id=card.id,
+                name=card.name,
+                relation=card.relation,
+                impression=card.impression,
+                is_owner=True,
+                familiarity=1.0,
+                affinity=self.state.owner_affinity,
+            )
+        rel = self.state.people.get(person_id)
+        if rel is None:
+            return None
+        advance_relation(rel, now, self.params.people)
+        return PersonBrief(
+            id=card.id,
+            name=card.name,
+            relation=card.relation,
+            impression=card.impression,
+            shown_as=[s for s in shown_as if s != card.name],
+            namesake=self.people.namesake(card),
+            familiarity=rel.familiarity,
+            affinity=rel.affinity,
+            first_contact=rel.contacts <= 1,
+        )
+
+    def _briefs(self, events: list[Event], event_people: list[str | None]) -> list[PersonBrief]:
+        """这次涉及的人：主人（有印象时）在前，其余按出场顺序，最多 prompt_people 个。"""
+        now = self.clock.now()
+        shown: dict[str, list[str]] = {}
+        for e, pid in zip(events, event_people, strict=True):
+            if pid is None or pid == OWNER_ID:
+                continue
+            names = shown.setdefault(pid, [])
+            sender = e.payload.get("sender")
+            if isinstance(sender, str) and sender and sender not in names:
+                names.append(sender)
+        out: list[PersonBrief] = []
+        if self.people.owner.impression and (brief := self._brief(OWNER_ID, now, [])):
+            out.append(brief)
+        for pid in list(shown)[: self.params.people.prompt_people]:
+            if brief := self._brief(pid, now, shown[pid]):
+                out.append(brief)
+        return out
+
+    def _settle_bonds(self, now: datetime) -> None:
+        """每天第一次入睡时，近期的感觉沉淀一点进长期感情。"""
+        st, pp = self.state, self.params.people
+        day = self.today(now)
+        if st.bonds_settled_on == day:
+            return
+        st.bonds_settled_on = day
+        st.owner_bond = settle_bond(
+            self.owner_bond, st.owner_affinity, pp, floor=pp.owner_bond_floor
+        )
+        for rel in st.people.values():
+            advance_relation(rel, now, pp)
+            rel.bond = settle_bond(rel.bond, rel.affinity, pp)
+
+    def _forget_people(self, now: datetime) -> None:
+        """忘掉只打过一两次交道、没留下印象、很久没来往的人；人数超过上限时先忘最不熟的。"""
+        st, pp = self.state, self.params.people
+
+        def forgettable(pid: str) -> bool:
+            return not st.people[pid].known and not self.people.saved(pid)
+
+        for rel in st.people.values():
+            advance_relation(rel, now, pp)
+        stale = [
+            pid
+            for pid, rel in st.people.items()
+            if forgettable(pid)
+            and rel.familiarity < pp.forget_familiarity
+            and (
+                rel.last_contact is None
+                or hours_between(rel.last_contact, now) >= pp.forget_after_days * 24
+            )
+        ]
+        extra = len(st.people) - len(stale) - pp.max_people
+        if extra > 0:
+            rest = sorted(
+                (pid for pid in st.people if pid not in stale and forgettable(pid)),
+                key=lambda pid: (st.people[pid].familiarity, st.people[pid].last_contact or now),
+            )
+            stale += rest[:extra]
+        for pid in stale:
+            del st.people[pid]
+            self.people.forget(pid)
+
+    def _day_people(self, items: list[JournalEntry], now: datetime) -> list[PersonBrief]:
+        ids = list(dict.fromkeys(e.person for e in items if e.person and e.kind in ("in", "out")))
+        return [b for pid in ids if (b := self._brief(pid, now, []))]
 
     # ------------------------------------------------------------------ 记忆
 
@@ -726,6 +883,7 @@ class Persona:
                 cursor = min(cursor, items[0].time - timedelta(microseconds=1))
                 break
         ms.consolidated_until = cursor
+        self._settle_bonds(now)
         await self._maybe_refine_notebook(now)
 
     async def _write_diary(self, day: date, items: list[JournalEntry]) -> None:
@@ -733,6 +891,7 @@ class Persona:
         mood = self.state.memory.day_moods.get(day, DayMood())
         v, a = mood.mean
         can_mark = self.memory.important_left(day) > 0
+        people = self._day_people(items, self.clock.now())
         result = await self.mind.consolidate(
             ConsolidationInput(
                 day=day,
@@ -742,8 +901,13 @@ class Persona:
                 notes=self.memory.inbox,
                 mood_label=mood_label(v, a, self.params.affect.calm_threshold),
                 can_mark_important=can_mark,
+                people=people,
             )
         )
+        allowed = {b.id for b in people}
+        for upd in result.people:
+            if upd.id in allowed:
+                self.people.update(upd, max_chars=self.params.people.impression_chars)
         draft = result.diary
         if draft is not None and draft.text.strip():
             keep_important = existing is not None and existing.meta.importance == "important"
@@ -781,19 +945,32 @@ class Persona:
             ms.notebook_refined_at = now
 
     def _apply_event_appraisals(
-        self, events: list[Event], appraisals: list[EventAppraisal]
+        self,
+        events: list[Event],
+        event_people: list[str | None],
+        appraisals: list[EventAppraisal],
     ) -> None:
-        st, wp = self.state, self.params.will
+        """事件改变心情；对发消息的人的感觉看 regard（没给时看事件本身的好坏）。
+
+        陌生人带来的情绪冲击打折扣，越熟越接近原样。
+        """
+        st, wp, pp = self.state, self.params.will, self.params.people
         for a in appraisals:
             if not 1 <= a.event <= len(events):
                 continue
-            st.affect = apply_appraisal(st.affect, a, self.params.affect)
-            if events[a.event - 1].trust == Trust.OWNER and a.valence != "neutral":
-                mag = INTENSITY[a.intensity]
-                delta = (
-                    wp.affinity_gain * mag if a.valence == "positive" else -wp.affinity_loss * mag
-                )
+            pid = event_people[a.event - 1]
+            rel = st.people.get(pid) if pid is not None and pid != OWNER_ID else None
+            scale = impact_scale(rel, pp) if rel is not None else 1.0
+            st.affect = apply_appraisal(st.affect, a, self.params.affect, scale)
+            toward = a.toward_sender
+            if toward == "neutral":
+                continue
+            mag = INTENSITY[a.intensity]
+            if pid == OWNER_ID:
+                delta = wp.affinity_gain * mag if toward == "positive" else -wp.affinity_loss * mag
                 st.owner_affinity = clamp(st.owner_affinity + delta, -1.0, 1.0)
+            elif rel is not None:
+                feel_about(rel, toward, mag, pp)
 
     def _decide(self, events: list[Event], requests: list[RequestAssessment]) -> list[WillDecision]:
         st = self.state
@@ -843,18 +1020,23 @@ class Persona:
                 await self._pause_between(reply.text)
             pending_pause = True
             target: Event | None = None
+            person: str | None = None
             if reply.event is not None and 1 <= reply.event <= len(ctx.events):
                 target = ctx.events[reply.event - 1]
+                if reply.event <= len(ctx.event_people):
+                    person = ctx.event_people[reply.event - 1]
             if target is not None and not target.source.startswith(CORE_SOURCE_PREFIX):
                 plugin = target.source
             elif target is not None and st.owner_channel is not None:
                 plugin = st.owner_channel
+                person = OWNER_ID
             elif ctx.proactive_allowed and st.owner_channel is not None:
                 plugin = st.owner_channel
                 st.last_proactive_at = now
+                person = OWNER_ID
             else:
                 continue
-            self._journal(now, "out", reply.text, who=plugin)
+            self._journal(now, "out", reply.text, who=plugin, person=person)
             args: dict[str, Any] = {"text": reply.text, "reply_to": target.id if target else None}
             if target is not None and target.source == plugin:
                 args.update(_reply_route(target))
@@ -883,18 +1065,20 @@ class Persona:
                 await self._actuate(e.source, "send_message", args)
                 return
 
-    def _journal(self, t: datetime, kind: EntryKind, text: str, who: str = "") -> None:
-        self.journal.add(JournalEntry(time=t, kind=kind, who=who, text=text))
+    def _journal(
+        self, t: datetime, kind: EntryKind, text: str, who: str = "", person: str | None = None
+    ) -> None:
+        self.journal.add(JournalEntry(time=t, kind=kind, who=who, text=text, person=person))
 
-    def _journal_events(self, events: list[Event]) -> None:
-        for e in events:
+    def _journal_events(self, events: list[Event], event_people: list[str | None]) -> None:
+        for e, person in zip(events, event_people, strict=True):
             text = e.payload.get("text")
             if e.type == "alarm":
                 text = f"闹钟响了：{e.payload.get('reason', '')}"
             elif not isinstance(text, str):
                 text = f"（{e.type}）"
             who = self.owner_call if e.trust == Trust.OWNER else str(e.payload.get("sender", ""))
-            self._journal(e.time, "in", text, who=who or e.source)
+            self._journal(e.time, "in", text, who=who or e.source, person=person)
 
     def _apply_effects(self, outcome: WakeOutcome) -> None:
         st = self.state

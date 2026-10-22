@@ -102,7 +102,7 @@ class WillParams(_Params):
     # 不情愿照做的代价
     reluctant_valence_impulse: float = -0.15
     reluctant_affinity_drop: float = 0.05
-    # 对主人的好感 [-1, 1]
+    # 对主人的近期好感 [-1, 1]，回归长期感情；长期感情从 affinity_baseline 起步
     affinity_baseline: float = 0.5
     affinity_half_life_h: float = 72.0
     affinity_gain: float = 0.02
@@ -156,6 +156,38 @@ class MemoryParams(_Params):
     journal_min_entries: int = 12
 
 
+class PeopleParams(_Params):
+    # 刚认识时的好感 [-1, 1]：陌生人 / 主人登记的熟人
+    stranger_affinity: float = 0.0
+    known_affinity: float = 0.3
+    # 主人登记的熟人，熟悉度不低于这个值
+    known_familiarity: float = 0.3
+    # 别人带来的好事 / 坏事改变好感：乘以强度（0.1 / 0.25 / 0.5）
+    affinity_gain: float = 0.1
+    affinity_loss: float = 0.2
+    # 近期好感以这个半衰期回到长期感情
+    affinity_half_life_h: float = 72.0
+    # 每天睡前，长期感情向近期好感靠拢这个比例（主人也一样）
+    bond_rate: float = 0.1
+    # 对主人的长期感情不低于这个值：关系本身由人设决定，不会被磨没
+    owner_bond_floor: float = 0.2
+    # 每次交往，熟悉度向 1 靠拢这个比例；间隔不到 contact_gap_min 的算同一次
+    familiarity_gain: float = 0.08
+    contact_gap_min: float = 30.0
+    # 不来往时熟悉度的半衰期（天）
+    familiarity_half_life_days: float = 90.0
+    # 陌生人带来的情绪冲击打这个折扣，越熟越接近原样
+    stranger_impact: float = Field(default=0.6, ge=0.0, le=1.0)
+    # 一次思考最多带几个人的档案
+    prompt_people: int = 4
+    # 印象最多多少字
+    impression_chars: int = 200
+    # 还没留下印象、不熟、这么久没来往的人会被忘掉
+    forget_after_days: float = 30.0
+    forget_familiarity: float = 0.2
+    max_people: int = 300
+
+
 class PersonaParams(_Params):
     sleep: SleepParams = Field(default_factory=SleepParams)
     affect: AffectParams = Field(default_factory=AffectParams)
@@ -163,6 +195,7 @@ class PersonaParams(_Params):
     will: WillParams = Field(default_factory=WillParams)
     mind: MindParams = Field(default_factory=MindParams)
     memory: MemoryParams = Field(default_factory=MemoryParams)
+    people: PeopleParams = Field(default_factory=PeopleParams)
 
 
 def load_params(path: Path) -> PersonaParams:
