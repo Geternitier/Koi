@@ -102,7 +102,7 @@ class WebPlugin:
                 Capability(name="send_message", description="向网页发送消息", tool=False)
             ],
             max_trust="owner",
-            permissions=["approve", "owner_ui"],
+            permissions=["approve", "owner_ui", "appearance"],
         )
         self.history: deque[dict[str, Any]] = deque(maxlen=history)
         self._history_path = Path(history_path) if history_path is not None else None
@@ -327,6 +327,19 @@ class WebPlugin:
             except Exception as e:
                 raise HTTPException(503, str(e)) from None
             return snapshot.model_dump(mode="json")
+
+        @app.get("/api/avatar")
+        async def avatar() -> Response:
+            try:
+                img = await self.ctx.image("avatar")
+            except Exception:
+                raise HTTPException(404, "没有头像") from None
+            # 页面用 ?v=<内容哈希> 取图，换了图地址就变，所以可以放心缓存
+            return Response(
+                img.data,
+                media_type=img.info.media_type,
+                headers={"Cache-Control": "private, max-age=86400", "ETag": f'"{img.info.sha256}"'},
+            )
 
         @app.get("/api/approvals")
         async def approvals() -> list[dict[str, Any]]:

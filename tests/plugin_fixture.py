@@ -18,7 +18,7 @@ from koi.protocol.stdio import serve_stdio
 
 CAPS = [
     "echo", "emit", "state", "crash", "ask", "seen", "print", "env", "approvals", "hang",
-    "interact", "interactions_seen", "secret",
+    "interact", "interactions_seen", "secret", "image",
 ]  # fmt: skip
 
 
@@ -91,6 +91,17 @@ class Fixture:
             case "secret":
                 await self.ctx.set_secret("token", str(args["value"]))
                 return {"value": await self.ctx.get_secret("token")}
+            case "image":
+                import hashlib
+
+                view = await self.ctx.appearance()
+                img = await self.ctx.image(str(args["id"]))
+                return {
+                    "description": view.description,
+                    "ids": [i.id for i in view.images],
+                    "media_type": img.info.media_type,
+                    "intact": hashlib.sha256(img.data).hexdigest() == img.info.sha256,
+                }
             case "hang":
                 import asyncio
 

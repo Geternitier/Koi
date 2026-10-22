@@ -16,10 +16,12 @@ from typing import Any, BinaryIO
 
 from koi.protocol import (
     PROTOCOL_VERSION,
+    AppearanceView,
     Approval,
     ApprovalRequest,
     AuditRecord,
     EventIn,
+    ImageData,
     Interaction,
     InteractionRequest,
     MemorySnapshot,
@@ -47,6 +49,12 @@ class RemoteContext:
 
     async def memory_view(self) -> MemorySnapshot:
         return MemorySnapshot.model_validate(await self._peer.request("koi/memory"))
+
+    async def appearance(self) -> AppearanceView:
+        return AppearanceView.model_validate(await self._peer.request("koi/appearance"))
+
+    async def image(self, image_id: str) -> ImageData:
+        return ImageData.model_validate(await self._peer.request("koi/image", {"id": image_id}))
 
     async def request_approval(self, request: ApprovalRequest) -> str:
         result = await self._peer.request("koi/approval/request", request.model_dump())

@@ -1,4 +1,4 @@
-"""人设模板：`templates/<名字>/` 下的 profile.md 和 params.yaml。
+"""人设模板：`templates/<名字>/` 下的 profile.md 和 params.yaml，以及 profile.md 里登记的图片。
 
 创建实例时把模板复制进实例的 persona 目录，之后两者互不影响。
 """
@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from koi.persona.appearance import resolve_file
 from koi.persona.profile import PersonaProfile, parse_profile
 
 TEMPLATES = Path(__file__).parent / "templates"
@@ -71,16 +72,31 @@ def install(
     persona_dir.mkdir(parents=True, exist_ok=True)
     (persona_dir / "profile.md").write_text(text, encoding="utf-8")
     shutil.copyfile(params_src, persona_dir / "params.yaml")
+    _copy_images(profile, profile_src.parent, persona_dir)
     return profile
+
+
+def _copy_images(profile: PersonaProfile, src_dir: Path, persona_dir: Path) -> None:
+    """人设里登记的图片跟着复制过去，保持相对路径。找不到的留给启动时报警告。"""
+    for rel in profile.image_files:
+        src, dst = resolve_file(src_dir, rel), resolve_file(persona_dir, rel)
+        if src is None or dst is None or not src.is_file():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
 
 
 def ensure(persona_dir: Path) -> None:
     """补上缺失的设定文件（默认实例首次启动时）。"""
     base = _template_dir(DEFAULT_TEMPLATE)
     persona_dir.mkdir(parents=True, exist_ok=True)
+    fresh = not (persona_dir / "profile.md").exists()
     for f in FILES:
         if not (persona_dir / f).exists():
             shutil.copyfile(base / f, persona_dir / f)
+    if fresh:
+        profile = parse_profile((base / "profile.md").read_text(encoding="utf-8"))
+        _copy_images(profile, base, persona_dir)
 
 
 def rename(text: str, name: str) -> str:

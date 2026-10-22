@@ -18,11 +18,13 @@ from koi.kernel.interactions import InteractionService
 from koi.kernel.secrets import Redactor, SecretStore
 from koi.kernel.store import Store
 from koi.protocol import (
+    AppearanceView,
     Approval,
     ApprovalRequest,
     AuditRecord,
     Capability,
     EventIn,
+    ImageData,
     Interaction,
     InteractionRequest,
     Manifest,
@@ -39,6 +41,9 @@ AUDIT_SUMMARY_CHARS = 500
 
 StateProvider = Callable[[], dict[str, Any]]
 MemoryProvider = Callable[[], dict[str, Any]]
+AppearanceProvider = Callable[[], AppearanceView]
+# 图片 ID -> 图片，没有这张时为 None
+ImageProvider = Callable[[str], ImageData | None]
 
 
 class PluginError(RuntimeError):
@@ -78,6 +83,20 @@ class _Context:
         if self._host._memory_provider is None:
             raise PluginError("记忆服务未启用")
         return MemorySnapshot.model_validate(self._host._memory_provider())
+
+    async def appearance(self) -> AppearanceView:
+        self._require("appearance")
+        if self._host._appearance_provider is None:
+            return AppearanceView(name="")
+        return self._host._appearance_provider()
+
+    async def image(self, image_id: str) -> ImageData:
+        self._require("appearance")
+        provider = self._host._image_provider
+        image = provider(image_id) if provider is not None else None
+        if image is None:
+            raise PluginError(f"没有这张图：{image_id}")
+        return image
 
     async def request_approval(self, request: ApprovalRequest) -> str:
         return self._host._approvals_or_raise().request(self.plugin_id, request).id
@@ -173,6 +192,8 @@ class PluginHost:
         self._plugins: dict[str, Plugin] = {}
         self._state_provider: StateProvider = dict
         self._memory_provider: MemoryProvider | None = None
+        self._appearance_provider: AppearanceProvider | None = None
+        self._image_provider: ImageProvider | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         if approvals is not None:
             approvals.bind(self._on_approval)
@@ -198,6 +219,10 @@ class PluginHost:
 
     def set_memory_provider(self, provider: MemoryProvider) -> None:
         self._memory_provider = provider
+
+    def set_appearance_provider(self, appearance: AppearanceProvider, image: ImageProvider) -> None:
+        self._appearance_provider = appearance
+        self._image_provider = image
 
     @property
     def plugin_ids(self) -> list[str]:
