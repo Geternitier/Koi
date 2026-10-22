@@ -177,7 +177,11 @@ grants:                  # 长期授权的目录
 shell_policy: whitelist  # approve_all 全部审批 / whitelist 只读的简单命令自动执行 / trust 全部自动执行
 shell_timeout_s: 60
 approval_ttl_min: 30     # 批准的有效期（分钟）
+web_search: false        # true 时可以网上搜索，不必批准
+workspace_practice: false # true 时工作区内的命令直接执行，不必批准
 ```
+
+`web_search` 只返回搜索结果的标题、链接和摘要。`workspace_practice` 只放行参数落在工作区里的命令；`curl`、`pip`、`git` 这类会访问网络的命令，以及工作区以外的路径，仍然要批准。两项缺省都是关闭。已有实例的配置文件不会自动改写，需要这两项时自己补上，然后重启。
 
 ## 开发
 

@@ -240,6 +240,82 @@ async def test_shell_policies(tmp_path):
     assert r["exit_code"] == 0
 
 
+SEARCH_HTML = """
+<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=1">
+Example <b>Title</b></a>
+<a class="result__snippet" href="https://example.com/a">A <b>snippet</b> here</a>
+<a class="result__a" href="https://other.example/b">Other</a>
+<div class="result__snippet">Second snippet</div>
+<a class="result__a" href="/relative">Skip</a>
+<div class="result__snippet">no</div>
+"""
+
+
+def test_parse_search_results():
+    results = harness.parse_search_results(SEARCH_HTML)
+    assert results == [
+        {"title": "Example Title", "url": "https://example.com/a", "snippet": "A snippet here"},
+        {"title": "Other", "url": "https://other.example/b", "snippet": "Second snippet"},
+    ]
+
+
+async def test_web_search_is_off_unless_configured(env: Env, tmp_path):
+    assert "web_search" not in [c.name for c in env.plugin.manifest.capabilities]
+    assert "没有开启" in (await env.call("web_search", query="猫"))["error"]
+    assert env.ctx.requests == []
+
+    enabled = await Env(tmp_path / "search", web_search=True).start()
+    assert "web_search" in [c.name for c in enabled.plugin.manifest.capabilities]
+
+
+async def test_web_search_returns_results_without_approval(tmp_path, monkeypatch):
+    env = await Env(tmp_path, web_search=True).start()
+    monkeypatch.setattr(harness, "fetch_search_html", lambda query: SEARCH_HTML)
+    r = await env.call("web_search", query="猫")
+    assert r["ok"] and r["query"] == "猫"
+    assert r["results"][0]["url"] == "https://example.com/a"
+    assert env.ctx.requests == []
+    assert "搜索词为空" in (await env.call("web_search", query="  "))["error"]
+
+    def boom(_query: str) -> str:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(harness, "fetch_search_html", boom)
+    assert "搜索失败" in (await env.call("web_search", query="猫"))["error"]
+    assert env.ctx.requests == []
+
+
+async def test_workspace_practice_runs_local_commands_without_approval(tmp_path):
+    env = await Env(tmp_path, workspace_practice=True).start()
+    script = f'"{sys.executable}" hi.py'
+    assert env.plugin.is_workspace_command(script)
+    assert not env.plugin.is_workspace_command("curl https://example.com")
+    assert not env.plugin.is_workspace_command("pip install requests")
+    assert not env.plugin.is_workspace_command(f'"{sys.executable}" "{env.outside / "x.py"}"')
+    assert not env.plugin.is_workspace_command(f'"{sys.executable}" "{env.data / "secrets.txt"}"')
+
+    made = "New-Item -ItemType Directory -Force made" if IS_WINDOWS else "mkdir -p made"
+    assert env.plugin.is_workspace_command(made)
+    r = await env.call("run_shell", command=made)
+    assert r["ok"] and r["exit_code"] == 0 and (env.ws / "made").is_dir()
+    assert env.ctx.requests == []
+
+    outside = await env.call("run_shell", command=f'"{sys.executable}" "{env.outside / "x.py"}"')
+    assert outside["needs_approval"]
+    networked = await env.call("run_shell", command="curl https://example.com")
+    assert networked["needs_approval"]
+    blocked = await env.call(
+        "run_shell", command=f'"{sys.executable}" "{env.data / "secrets.txt"}"'
+    )
+    assert "禁止" in blocked["error"] and not blocked.get("needs_approval")
+
+    strict = await Env(
+        tmp_path / "strict", shell_policy="approve_all", workspace_practice=True
+    ).start()
+    r = await strict.call("run_shell", command=made)
+    assert r["ok"] and r["exit_code"] == 0 and strict.ctx.requests == []
+
+
 async def test_shell_timeout(tmp_path):
     env = await Env(tmp_path, shell_policy="trust", shell_timeout_s=0.5).start()
     cmd = "Start-Sleep -Seconds 5" if IS_WINDOWS else "sleep 5"

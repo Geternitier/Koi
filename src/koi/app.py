@@ -91,6 +91,10 @@ shell_policy: whitelist
 shell_timeout_s: 60
 # 批准的有效期（分钟）
 approval_ttl_min: 30
+# 网络搜索。true 时提供 web_search，直接搜索，不必批准
+web_search: false
+# 工作区内实践。true 时，参数都落在工作区里的命令直接执行，不必批准
+workspace_practice: false
 """
 
 

@@ -122,6 +122,11 @@ class MindParams(_Params):
     max_tool_rounds: int = 6
     max_tool_calls_per_round: int = 3
     tool_result_chars: int = 6000
+    # 第一拍之后最多再开口几次，用来把一段信息拆成多条消息
+    max_speech_rounds: int = 3
+    # 精力或效价低于此值就不再续说（累了、心情低落时只说完这一拍）
+    continue_min_energy: float = 25.0
+    continue_min_valence: float = -0.2
     # LLM 调用折算为活动疲劳
     energy_per_call: float = 0.4
     energy_per_1k_output: float = 1.0

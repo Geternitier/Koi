@@ -63,6 +63,7 @@ class AlarmOutput(BaseModel):
 class ActOutput(BaseModel):
     thought: str = ""
     replies: list[Reply] = Field(default_factory=list)
+    more: bool = False
     activity: str | None = None
     engaged: bool = False
     feeling: Appraisal | None = None
@@ -137,6 +138,7 @@ class LLMMind:
             engaged=out.engaged,
             alarms=alarms,
             replies=out.replies,
+            more=out.more,
             thought=out.thought or None,
             activity=out.activity or None,
             tool_calls=out.tools if ctx.tools else [],

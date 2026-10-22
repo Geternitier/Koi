@@ -315,13 +315,18 @@ def act_prompt(
     )
     tools_field = ', "tools": []' if ctx.tools else ""
     tools_help = "\n" + TOOLS_HELP.format(owner=owner) if ctx.tools else ""
-    replies_note = "已经回复过的内容不要重复说。" if ctx.tool_results else ""
+    replies_note = (
+        "已经说过的不要重复；还没说完的信息接着说，说完了就把 more 设为 false。"
+        if ctx.said
+        else ""
+    )
     parts.append(f"""# 任务：思考与表达
 输出 json，格式：
-{{"thought": "内心独白", "replies": [{{"event": 1, "text": "要说的话"}}], "activity": null, "engaged": false, "feeling": null, "alarm": null{tools_field}}}
+{{"thought": "内心独白", "replies": [{{"event": 1, "text": "要说的话"}}], "more": false, "activity": null, "engaged": false, "feeling": null, "alarm": null{tools_field}}}
 说明：
 - thought：此刻的内心独白，第一人称，一两句。
-- replies：对新事件的回复。可以把多条消息合并成一条回复（event 填最后一条的序号）。event 为 null 表示主动找{owner}说话{proactive}。不想说话时可以为空列表，但{owner}找你时通常应该回应。{replies_note}
+- replies：这一拍要发出去的话，按顺序写，一条是一条短消息。要说的信息多就拆开，这一拍只放现在说的那几句。event 填所回应的新事件序号（回应的是其中最后一条时，填那一条的序号）。event 为 null 表示主动找{owner}说话{proactive}。不想说话时可以为空列表，但{owner}找你时通常应该回应。{replies_note}
+- more：发完这一拍还想继续说时为 true，下一拍再补没说完的信息。说完了就是 false。答应陪{owner}聊天、说说话时，只回「好呀」等于还没做：心情合适就接着从你记得的经历、日记或笔记本里起一个具体话题，一次只推进一点，然后把话头留给{owner}。很累或心情低落时 more 必须为 false。不要编造记得的事，也不要连着抛好几个问题。
 - activity：如果是你自己回过神来、做了点什么，用一句话写下做了什么（只能是脑子里能做的事：发呆、回想、构思、琢磨点子），否则为 null。
 - engaged：自己回过神来时，是否找到了想做的事。
 - feeling：做的事或说的话给你带来的感受，格式 {{"valence": "positive|neutral|negative", "arousal": "exciting|neutral|calming", "intensity": "slight|medium|strong"}}，没有就为 null。
