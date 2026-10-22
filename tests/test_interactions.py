@@ -183,8 +183,9 @@ async def test_sms_login_flow_keeps_values_out_of_everything(caplog):
         # 主人直接在聊天框里回验证码：被截获，不会作为消息发给她
         r = await c.post("/api/messages", json={"text": CODE})
         assert r.json() == {"ok": True, "captured": True}
-        history = (await c.get("/api/history")).json()
-        assert history[-2] == {"role": "owner", "text": "••••••", "time": history[-2]["time"]}
+        history = (await c.get("/api/history")).json()["messages"]
+        assert history[-2]["role"] == "owner" and history[-2]["text"] == "••••••"
+        assert set(history[-2]) == {"id", "role", "text", "time"}
         assert "不会发给她" in history[-1]["text"]
         # 普通消息照常发给她
         await c.post("/api/messages", json={"text": "登好了吗"})

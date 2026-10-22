@@ -174,6 +174,10 @@
     return message.role + "|" + (message.time || "") + "|" + (message.text || "");
   }
 
+  function messageKey(message) {
+    return message && message.id ? "id:" + message.id : "fp:" + fingerprint(message);
+  }
+
   function medallionHTML(size, initial) {
     return '<span class="medallion" style="width:' + size + "px;height:" + size + 'px" aria-hidden="true">'
       + '<svg viewBox="0 0 100 100"><use href="#medallion-base"/>'
@@ -433,10 +437,11 @@
 
   function messageHTML(message) {
     const time = timeOf(message.time);
+    const mid = message.id ? ' data-msg-id="' + esc(message.id) + '"' : "";
     if (message.role === "system") {
       const text = String(message.text || "");
       const isError = message.error || /失败|出错|错误|没想成/.test(text);
-      return '<div class="k-sys' + (isError ? " error" : "") + '">'
+      return '<div class="k-sys' + (isError ? " error" : "") + '"' + mid + ">"
         + '<svg class="i"><use href="#' + (isError ? "i-alert" : "i-sparkles") + '"/></svg>'
         + "<span>" + fmt(text) + "</span>"
         + (time ? '<span class="time">' + time + "</span>" : "")
@@ -448,14 +453,14 @@
         : message.failed
           ? '<div class="k-msg-status">未送达</div>'
           : "";
-      return '<div class="k-msg owner' + (message.pending ? " pending" : "") + (message.failed ? " failed" : "") + '">'
+      return '<div class="k-msg owner' + (message.pending ? " pending" : "") + (message.failed ? " failed" : "") + '"' + mid + ">"
         + '<div class="k-msg-main">'
         + '<div class="k-msg-name"><span>你</span><time>' + esc(time) + "</time></div>"
         + '<div class="k-bubble">' + fmt(message.text) + "</div>"
         + status
         + "</div></div>";
     }
-    return '<div class="k-msg koi">'
+    return '<div class="k-msg koi"' + mid + ">"
       + medallionHTML(29, state.initial)
       + '<div class="k-msg-main">'
       + '<div class="k-msg-name"><b>' + esc(state.name) + "</b><time>" + esc(time) + "</time></div>"
@@ -522,7 +527,11 @@
       rows.push(messageHTML(message));
     }
     if (state.typing) rows.push(typingHTML());
-    els.log.innerHTML = '<div class="k-log-inner">' + rows.join("") + "</div>";
+    const more = state.historyHasMore
+      ? '<button class="k-history-more" data-more' + (state.historyLoading ? " disabled" : "") + ">"
+        + (state.historyLoading ? "正在读取更早的消息…" : "加载更早的消息") + "</button>"
+      : "";
+    els.log.innerHTML = '<div class="k-log-inner">' + more + rows.join("") + "</div>";
     if (stay) {
       requestAnimationFrame(() => scrollBottom("auto"));
     } else {
@@ -1032,8 +1041,7 @@
     if (state.samples.length > MAX_SAMPLES) state.samples.shift();
   }
 
-  async function loadState() {
-    const data = await api("/api/state");
+  function applyState(data) {
     if (!data || typeof data !== "object") throw new Error("状态格式不对");
     const previousInitial = state.initial;
     state.name = data.name || "Koi";
@@ -1061,9 +1069,15 @@
     if (state.view === "status") renderStatus();
   }
 
+  async function loadState() {
+    const data = await api("/api/state");
+    applyState(data);
+  }
+
   function normalizeMessage(message) {
     const role = message.role === "owner" || message.role === "koi" ? message.role : "system";
     return {
+      id: message.id || "",
       role,
       text: String(message.text || ""),
       time: message.time || new Date().toISOString()
@@ -1071,14 +1085,18 @@
   }
 
   async function loadHistory() {
-    const list = await api("/api/history");
+    const data = await api("/api/history?limit=60");
+    const list = Array.isArray(data) ? data : (data && data.messages) || [];
     if (!Array.isArray(list)) return;
     const server = list.map(normalizeMessage);
     const pending = state.messages.filter((message) => message.pending || message.failed);
     const serverOwner = new Set(server.filter((message) => message.role === "owner").map((message) => message.text));
     const kept = pending.filter((message) => !(message.role === "owner" && serverOwner.has(message.text)));
     state.messages = server.concat(kept);
-    state.seen = new Set(server.map(fingerprint));
+    state.seen = new Set(server.map(messageKey));
+    state.historyHasMore = Boolean(data && data.has_more);
+    state.historyNextBefore = (data && data.next_before) || null;
+    state.historyLoading = false;
     const last = state.messages[state.messages.length - 1];
     if (last && last.role === "koi") {
       state.awaiting = false;
@@ -1088,6 +1106,56 @@
       }
     }
     renderMessages();
+  }
+
+  function visibleMessageAnchor() {
+    const top = els.log.getBoundingClientRect().top;
+    const nodes = els.log.querySelectorAll("[data-msg-id]");
+    for (const node of nodes) {
+      if (node.getBoundingClientRect().bottom > top + 1) {
+        return { id: node.dataset.msgId, top: node.getBoundingClientRect().top, scrollTop: els.log.scrollTop };
+      }
+    }
+    return null;
+  }
+
+  async function loadOlder() {
+    if (!state.historyHasMore || state.historyLoading) return;
+    const oldest = state.messages.find((message) => message.id);
+    if (!oldest || !oldest.id) return;
+    const anchor = visibleMessageAnchor();
+    const oldHeight = els.log.scrollHeight;
+    const oldTop = els.log.scrollTop;
+    state.historyLoading = true;
+    renderMessages();
+    try {
+      const data = await api("/api/history?limit=60&before=" + encodeURIComponent(oldest.id));
+      const list = ((data && data.messages) || []).map(normalizeMessage);
+      const existing = new Set(state.messages.map(messageKey));
+      const older = list.filter((message) => !existing.has(messageKey(message)));
+      older.forEach((message) => state.seen.add(messageKey(message)));
+      state.messages = older.concat(state.messages);
+      state.historyHasMore = Boolean(data && data.has_more);
+      state.historyNextBefore = (data && data.next_before) || null;
+      state.historyLoading = false;
+      renderMessages();
+      const next = anchor
+        ? Array.from(els.log.querySelectorAll("[data-msg-id]")).find((node) => node.dataset.msgId === anchor.id)
+        : null;
+      const previousBehavior = els.log.style.scrollBehavior;
+      els.log.style.scrollBehavior = "auto";
+      els.log.scrollTop = anchor && next
+        ? anchor.scrollTop + (next.getBoundingClientRect().top - anchor.top)
+        : els.log.scrollHeight - oldHeight + oldTop;
+      requestAnimationFrame(() => {
+        els.log.style.scrollBehavior = previousBehavior;
+      });
+    } catch (err) {
+      state.historyLoading = false;
+      if (err && err.status === 404) state.historyHasMore = false;
+      renderMessages();
+      toast("读取更早消息失败：" + err.message, "warn");
+    }
   }
 
   async function refreshPending() {
@@ -1214,6 +1282,13 @@
       }
       scheduleReconnect();
     };
+    es.addEventListener("state", (event) => {
+      try {
+        applyState(JSON.parse(event.data));
+      } catch (err) {
+        /* malformed state: wait for the next poll */
+      }
+    });
     es.onmessage = (event) => {
       try {
         handleIncoming(JSON.parse(event.data));
@@ -1237,19 +1312,20 @@
     if (message.role === "owner") {
       const local = findLocalOwner(message.text);
       if (local) {
+        local.id = message.id || local.id;
         local.role = message.role;
         local.text = message.text;
         local.time = message.time;
         local.pending = false;
         local.failed = false;
         local.local = false;
-        state.seen.add(fingerprint(local));
+        state.seen.add(messageKey(local));
         renderMessages();
         return;
       }
     }
-    if (state.seen.has(fingerprint(message))) return;
-    state.seen.add(fingerprint(message));
+    if (state.seen.has(messageKey(message))) return;
+    state.seen.add(messageKey(message));
     state.messages.push(message);
     if (message.role === "koi") {
       state.awaiting = false;
@@ -1615,7 +1691,8 @@
       if (!document.hidden) {
         try { await loadState(); } catch (err) { /* banner covers it */ }
       }
-      window.setTimeout(stateLoop, state.awaiting ? 1800 : 5000);
+      const delay = state.connected ? (state.awaiting ? 6000 : 15000) : (state.awaiting ? 1800 : 5000);
+      window.setTimeout(stateLoop, delay);
     };
     const pendingLoop = async () => {
       if (!document.hidden) {
@@ -1688,6 +1765,10 @@
       els.input.value = prompt.dataset.prompt;
       els.input.focus();
       updateComposer();
+      return;
+    }
+    if (event.target.closest("[data-more]")) {
+      loadOlder();
       return;
     }
     const filter = event.target.closest("[data-filter]");
@@ -1807,6 +1888,9 @@
     auditFilter: "all",
     auditBusy: false,
     auditError: "",
+    historyHasMore: false,
+    historyNextBefore: null,
+    historyLoading: false,
     memoryView: null,
     memoryLoading: false,
     memoryError: "",

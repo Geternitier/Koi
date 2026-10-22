@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -104,10 +105,50 @@ async def test_web_message_roundtrip():
         assert ctx.emitted[0].trust == "owner" and ctx.emitted[0].payload == {"text": "你好"}
         await plugin.call("send_message", {"text": "嗨"})
         history = (await c.get("/api/history")).json()
-        assert [(m["role"], m["text"]) for m in history] == [("owner", "你好"), ("koi", "嗨")]
+        assert [(m["role"], m["text"]) for m in history["messages"]] == [
+            ("owner", "你好"),
+            ("koi", "嗨"),
+        ]
+        assert all(m.get("id") for m in history["messages"])
         assert (await c.get("/api/state")).json() == {"name": "小鲤"}
         assert (await c.post("/api/messages", json={"text": ""})).status_code == 422
         assert "Koi" in (await c.get("/")).text
+
+
+async def test_web_history_paginates_with_stable_ids():
+    plugin = WebPlugin()
+    plugin._ctx = FakeCtx()
+    async with client(plugin) as c:
+        await c.post("/api/messages", json={"text": "一"})
+        await plugin.call("send_message", {"text": "二"})
+        await c.post("/api/messages", json={"text": "三"})
+
+        latest = (await c.get("/api/history?limit=2")).json()
+        assert [m["text"] for m in latest["messages"]] == ["二", "三"]
+        assert latest["has_more"] is True
+        assert latest["next_before"] == latest["messages"][0]["id"]
+
+        older = (await c.get("/api/history?limit=2&before=" + latest["next_before"])).json()
+        assert [m["text"] for m in older["messages"]] == ["一"]
+        assert older["has_more"] is False
+        assert older["next_before"] is None
+        assert (await c.get("/api/history?before=missing")).status_code == 404
+
+
+async def test_web_state_loop_pushes_named_state_events():
+    plugin = WebPlugin()
+    plugin._ctx = FakeCtx()
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+    plugin._subscribers.add(queue)
+    task = asyncio.create_task(plugin._state_loop())
+    try:
+        event = await asyncio.wait_for(queue.get(), 2)
+        assert event["kind"] == "state"
+        assert event["data"] == {"name": "小鲤"}
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 async def test_web_serves_static_assets_and_security_headers():

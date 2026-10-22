@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import re
 from collections import deque
 from collections.abc import AsyncIterator
@@ -10,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import qrcode
 import qrcode.image.svg
@@ -20,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from koi.protocol import Approval, Capability, EventIn, Interaction, Manifest, PluginContext
+
+log = logging.getLogger(__name__)
 
 PAGE = Path(__file__).with_name("index.html")
 STATIC_DIR = Path(__file__).with_name("static")
@@ -99,6 +103,8 @@ class WebPlugin:
         self._ctx: PluginContext | None = None
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[None] | None = None
+        self._state_task: asyncio.Task[None] | None = None
+        self._last_state_sig = ""
 
     # ---------------------------------------------------------------- 插件接口
 
@@ -109,8 +115,14 @@ class WebPlugin:
         )
         self._server = uvicorn.Server(config)
         self._task = asyncio.create_task(self._server.serve())
+        self._state_task = asyncio.create_task(self._state_loop())
 
     async def stop(self) -> None:
+        if self._state_task is not None:
+            self._state_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._state_task
+            self._state_task = None
         if self._server is not None:
             self._server.should_exit = True
         if self._task is not None:
@@ -139,10 +151,34 @@ class WebPlugin:
             {"role": "system", "text": text, "time": datetime.now().astimezone().isoformat()}
         )
 
+    def _broadcast(self, event: dict[str, Any]) -> None:
+        """给所有 SSE 订阅者投递事件。事件是 {kind, data}。"""
+        for queue in list(self._subscribers):
+            queue.put_nowait(event)
+
     def _publish(self, message: dict[str, Any]) -> None:
-        self.history.append(message)
-        for q in self._subscribers:
-            q.put_nowait(message)
+        item = dict(message)
+        item.setdefault("id", uuid4().hex)
+        self.history.append(item)
+        self._broadcast({"kind": "message", "data": item})
+
+    async def _state_loop(self) -> None:
+        """把状态变化推给页面，省掉高频轮询。断线时客户端仍会自行补拉。"""
+        while True:
+            if self._subscribers:
+                try:
+                    snapshot = await self.ctx.state()
+                    signature = json.dumps(
+                        snapshot, ensure_ascii=False, sort_keys=True, default=str
+                    )
+                    if signature != self._last_state_sig:
+                        self._last_state_sig = signature
+                        self._broadcast({"kind": "state", "data": snapshot})
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # 状态提供器暂时失败时不要让任务退出
+                    log.debug("读取状态失败", exc_info=True)
+            await asyncio.sleep(2.0)
 
     @property
     def ctx(self) -> PluginContext:
@@ -178,8 +214,25 @@ class WebPlugin:
             )
 
         @app.get("/api/history")
-        async def history() -> list[dict[str, Any]]:
-            return list(self.history)
+        async def history(limit: int = 60, before: str | None = None) -> dict[str, Any]:
+            size = max(1, min(200, limit))
+            records = list(self.history)
+            if before is None:
+                end = len(records)
+            else:
+                index = next(
+                    (i for i, message in enumerate(records) if message.get("id") == before), None
+                )
+                if index is None:
+                    raise HTTPException(404, "没有这条消息")
+                end = index
+            start = max(0, end - size)
+            page = records[start:end]
+            return {
+                "messages": page,
+                "has_more": start > 0,
+                "next_before": page[0].get("id") if start > 0 and page else None,
+            }
 
         @app.get("/api/state")
         async def state() -> dict[str, Any]:
@@ -284,11 +337,18 @@ class WebPlugin:
                 try:
                     while not await request.is_disconnected():
                         try:
-                            msg = await asyncio.wait_for(queue.get(), KEEPALIVE_S)
+                            item = await asyncio.wait_for(queue.get(), KEEPALIVE_S)
                         except TimeoutError:
                             yield ": keepalive\n\n"
                             continue
-                        yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                        if item.get("kind") == "state":
+                            payload = json.dumps(item["data"], ensure_ascii=False)
+                            yield f"event: state\ndata: {payload}\n\n"
+                        else:
+                            message = item.get("data", {})
+                            event_id = message.get("id")
+                            prefix = f"id: {event_id}\n" if event_id else ""
+                            yield prefix + f"data: {json.dumps(message, ensure_ascii=False)}\n\n"
                 finally:
                     self._subscribers.discard(queue)
 
