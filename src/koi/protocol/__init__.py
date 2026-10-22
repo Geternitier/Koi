@@ -5,10 +5,11 @@
 独立进程运行（JSON-RPC 2.0，见 `koi.protocol.rpc` 与 `koi.protocol.stdio`）。
 """
 
+import base64
 from datetime import date, datetime
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 PROTOCOL_VERSION = "koi/0.1"
 
@@ -16,7 +17,8 @@ TrustLevel = Literal["owner", "known_person", "external"]
 # approve：查看与处理审批、查看审计记录。只授予主人使用的界面类插件
 # owner_ui：向主人展示交互请求、提交主人填写的内容。只授予主人使用的界面类插件
 # interact：向主人发起交互请求（扫码、填验证码等）
-Permission = Literal["approve", "owner_ui", "interact"]
+# appearance：读取她的形象（头像、外貌描述、参考图），例如显示头像、用生图模型画她
+Permission = Literal["approve", "owner_ui", "interact", "appearance"]
 ApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 InteractionKind = Literal["display", "form"]
 InteractionStatus = Literal["pending", "submitted", "done", "failed", "cancelled", "expired"]
@@ -143,6 +145,41 @@ class MemorySnapshot(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class ImageInfo(BaseModel):
+    # avatar，或参考图 ref-1、ref-2……
+    id: str
+    kind: Literal["avatar", "reference"]
+    caption: str = ""
+    media_type: str
+    # 内容的 SHA-256，图片换了它就变，可以当缓存版本号
+    sha256: str
+    size: int
+
+
+class AppearanceView(BaseModel):
+    """她的形象。description 和参考图留给生图模型保持人物一致。"""
+
+    name: str
+    description: str = ""
+    avatar: ImageInfo | None = None
+    images: list[ImageInfo] = Field(default_factory=list)
+
+
+class ImageData(BaseModel):
+    info: ImageInfo
+    # JSON 里是 base64
+    data: bytes
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def _decode(cls, value: object) -> object:
+        return base64.b64decode(value, validate=True) if isinstance(value, str) else value
+
+    @field_serializer("data", when_used="json")
+    def _encode(self, value: bytes) -> str:
+        return base64.b64encode(value).decode("ascii")
+
+
 class PluginContext(Protocol):
     @property
     def plugin_id(self) -> str: ...
@@ -157,6 +194,14 @@ class PluginContext(Protocol):
 
     async def memory_view(self) -> MemorySnapshot:
         """日记与笔记本的只读视图（需要 owner_ui 权限）。"""
+        ...
+
+    async def appearance(self) -> AppearanceView:
+        """她的形象登记了什么（需要 appearance 权限）。"""
+        ...
+
+    async def image(self, image_id: str) -> ImageData:
+        """取一张形象图片，没有这张时抛错（需要 appearance 权限）。"""
         ...
 
     async def request_approval(self, request: ApprovalRequest) -> str:
@@ -233,12 +278,15 @@ class Plugin(Protocol):
 
 __all__ = [
     "PROTOCOL_VERSION",
+    "AppearanceView",
     "Approval",
     "ApprovalRequest",
     "ApprovalStatus",
     "AuditRecord",
     "Capability",
     "EventIn",
+    "ImageData",
+    "ImageInfo",
     "Interaction",
     "InteractionField",
     "InteractionKind",

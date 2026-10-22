@@ -285,6 +285,10 @@ class ProcessPlugin:
                 return await ctx.state()
             case "koi/memory":
                 return (await ctx.memory_view()).model_dump(mode="json")
+            case "koi/appearance":
+                return (await ctx.appearance()).model_dump(mode="json")
+            case "koi/image":
+                return (await ctx.image(str(params["id"]))).model_dump(mode="json")
             case "koi/approval/request":
                 return {"id": await ctx.request_approval(ApprovalRequest.model_validate(params))}
             case "koi/approvals":

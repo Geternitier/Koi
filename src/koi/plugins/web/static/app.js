@@ -37,7 +37,7 @@
     boot: $("boot"), bootText: $("bootText"), bootErr: $("bootErr"), bootRetry: $("bootRetry"),
     bell: $("bellBtn"), bellBadge: $("bellBadge"), cmd: $("cmdBtn"),
     theme: $("themeBtn"), railTheme: $("railTheme"),
-    railAvatar: $("railAvatar"), topAvatar: $("topAvatar"), railDot: $("railDot")
+    railAvatar: $("railAvatar"), railDot: $("railDot")
   };
 
   const STATUS_WORD = { sleeping: "睡着了", dozing: "发呆中", active: "正在想" };
@@ -178,11 +178,24 @@
     return message && message.id ? "id:" + message.id : "fp:" + fingerprint(message);
   }
 
-  function medallionHTML(size, initial) {
-    return '<span class="medallion" style="width:' + size + "px;height:" + size + 'px" aria-hidden="true">'
-      + '<svg viewBox="0 0 100 100"><use href="#medallion-base"/>'
+  function pondSVG(initial) {
+    return '<svg viewBox="0 0 100 100" aria-hidden="true"><use href="#medallion-base"/>'
       + '<text x="50" y="61.5" text-anchor="middle" font-size="31" fill="#1D4A46" stroke="#FFF9EC" stroke-width="1.1" paint-order="stroke">'
-      + esc(initial || "K") + "</text></svg></span>";
+      + esc(initial || "K") + "</text></svg>";
+  }
+
+  // 她的头像：人设里登记了头像就用图片，否则是池印
+  function portraitInner() {
+    if (state.avatar && !state.avatarBroken) {
+      return '<img class="k-avatar-img" src="/api/avatar?v=' + encodeURIComponent(state.avatar)
+        + '" alt="" draggable="false">';
+    }
+    return pondSVG(state.initial);
+  }
+
+  function medallionHTML(size) {
+    return '<span class="medallion" style="width:' + size + "px;height:" + size + 'px" aria-hidden="true">'
+      + portraitInner() + "</span>";
   }
 
   function paintMedallions() {
@@ -190,11 +203,19 @@
       const size = parseInt(el.getAttribute("data-medallion"), 10) || 36;
       el.style.width = size + "px";
       el.style.height = size + "px";
-      el.innerHTML = '<svg viewBox="0 0 100 100" aria-hidden="true"><use href="#medallion-base"/>'
-        + '<text x="50" y="61.5" text-anchor="middle" font-size="31" fill="#1D4A46" stroke="#FFF9EC" stroke-width="1.1" paint-order="stroke">'
-        + esc(state.initial) + "</text></svg>";
+      el.innerHTML = el.hasAttribute("data-brand") ? pondSVG(state.initial) : portraitInner();
     });
   }
+
+  // 头像加载失败（被删了、换成了坏文件）时退回池印。CSP 不允许内联 onerror，所以在捕获阶段统一处理
+  document.addEventListener("error", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLImageElement) || !target.classList.contains("k-avatar-img")) return;
+    if (state.avatarBroken) return;
+    state.avatarBroken = true;
+    paintMedallions();
+    renderMessages();
+  }, true);
 
   /* ------------------------------------------------------------------ API */
 
@@ -461,7 +482,7 @@
         + "</div></div>";
     }
     return '<div class="k-msg koi"' + mid + ">"
-      + medallionHTML(29, state.initial)
+      + medallionHTML(29)
       + '<div class="k-msg-main">'
       + '<div class="k-msg-name"><b>' + esc(state.name) + "</b><time>" + esc(time) + "</time></div>"
       + '<div class="k-bubble">' + fmt(message.text) + "</div>"
@@ -470,7 +491,7 @@
 
   function typingHTML() {
     return '<div class="k-msg koi typing">'
-      + medallionHTML(29, state.initial)
+      + medallionHTML(29)
       + '<div class="k-msg-main"><div class="k-msg-name"><b>' + esc(state.name) + "</b><time>正在想</time></div>"
       + '<div class="k-bubble"><i class="k-dot"></i><i class="k-dot"></i><i class="k-dot"></i><span class="k-typing-label">她在想…</span></div>'
       + "</div></div>";
@@ -478,7 +499,7 @@
 
   function emptyHTML() {
     return '<div class="k-empty">'
-      + medallionHTML(92, state.initial)
+      + medallionHTML(92)
       + "<h2>她还在打盹。</h2>"
       + "<p>说句话，让她醒过来。或者先看看她今天过得怎么样。</p>"
       + '<div class="k-chips">'
@@ -802,7 +823,7 @@
   function renderStatus() {
     const snapshot = state.snapshot;
     if (!snapshot) {
-      els.statusPage.innerHTML = '<div class="k-empty-page">' + medallionHTML(80, state.initial)
+      els.statusPage.innerHTML = '<div class="k-empty-page">' + medallionHTML(80)
         + "<h3>还在读她的状态</h3><p>等她醒过来，或者过一会儿再来看看。</p></div>";
       return;
     }
@@ -906,13 +927,13 @@
 
     if (state.memoryLoading && !view) {
       els.memoryPage.innerHTML = head
-        + '<div class="k-empty-page">' + medallionHTML(80, state.initial)
+        + '<div class="k-empty-page">' + medallionHTML(80)
         + "<h3>正在翻她的日记</h3><p>只读，不会改动任何内容。</p></div>";
       return;
     }
     if (state.memoryError && !view) {
       els.memoryPage.innerHTML = head
-        + '<div class="k-empty-page">' + medallionHTML(80, state.initial)
+        + '<div class="k-empty-page">' + medallionHTML(80)
         + "<h3>日记暂时打不开</h3><p>" + esc(state.memoryError) + "</p>"
         + '<button class="k-btn" data-action="refresh-memory">再试一次</button></div>';
       return;
@@ -920,7 +941,7 @@
 
     if (!shared) {
       els.memoryPage.innerHTML = head
-        + '<div class="k-empty-page">' + medallionHTML(80, state.initial)
+        + '<div class="k-empty-page">' + medallionHTML(80)
         + "<h3>日记还锁着</h3>"
         + "<p>她已经写下一些东西，但还没有允许网页查看正文。这里只显示数量，不会用假日记填满页面。</p>"
         + '<div class="k-memory-grid"><div class="k-card"><span class="k-big">' + diaries + '</span><p>篇日记</p></div>'
@@ -1044,8 +1065,11 @@
   function applyState(data) {
     if (!data || typeof data !== "object") throw new Error("状态格式不对");
     const previousInitial = state.initial;
+    const previousAvatar = state.avatar;
     state.name = data.name || "Koi";
     state.initial = initialOf(state.name);
+    state.avatar = typeof data.avatar === "string" && data.avatar ? data.avatar : null;
+    if (state.avatar !== previousAvatar) state.avatarBroken = false;
     state.snapshot = data.snapshot || null;
     state.thought = data.thought || null;
     state.llm = data.llm || {};
@@ -1057,7 +1081,7 @@
       interactions: Number(data.pending_interactions) || 0
     };
     addSample(state.snapshot);
-    if (previousInitial !== state.initial) {
+    if (previousInitial !== state.initial || previousAvatar !== state.avatar) {
       paintMedallions();
       renderMessages();
     }
@@ -1797,7 +1821,6 @@
   els.msPending.addEventListener("click", openSide);
   els.pinbarBtn.addEventListener("click", openSide);
   els.railAvatar.addEventListener("click", openSide);
-  els.topAvatar.addEventListener("click", openSide);
 
   els.theme.addEventListener("click", toggleTheme);
   els.railTheme.addEventListener("click", toggleTheme);
@@ -1875,6 +1898,8 @@
   state = {
     name: "Koi",
     initial: "K",
+    avatar: null,
+    avatarBroken: false,
     view: "chat",
     snapshot: null,
     thought: null,

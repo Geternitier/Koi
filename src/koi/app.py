@@ -55,10 +55,12 @@ from koi.persona import (
     load_profile,
     templates,
 )
+from koi.persona.appearance import Image, load_appearance
 from koi.persona.core import STATE_KEY
 from koi.persona.llm_mind import LLMMind
 from koi.persona.templates import TemplateError
 from koi.plugins.web import WebPlugin
+from koi.protocol import AppearanceView, ImageData, ImageInfo
 
 log = logging.getLogger("koi")
 
@@ -226,6 +228,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
 
     params = load_params(paths.persona / "params.yaml")
     profile = load_profile(paths.persona / "profile.md")
+    appearance = load_appearance(paths.persona, profile)
     registry.register(instance, profile.name)
     model = args.model or instance.config.model
     overrides: dict[str, Any] = {"model": model} if model else {}
@@ -359,6 +362,8 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
     def state() -> dict[str, Any]:
         return {
             "name": profile.name,
+            # 头像的版本号，页面拿它拼 /api/avatar?v=…；没有头像时为 None
+            "avatar": appearance.avatar.sha256[:16] if appearance.avatar else None,
             "snapshot": persona.snapshot().model_dump(mode="json"),
             "thought": persona.last_thought if params.mind.show_thoughts else None,
             "llm": {"calls": gateway.meter.calls, "cache_hit_rate": gateway.meter.cache_hit_rate},
@@ -375,8 +380,31 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
             "pending_interactions": len(interactions.pending()),
         }
 
+    def image_info(img: Image) -> ImageInfo:
+        return ImageInfo(
+            id=img.id,
+            kind=img.kind,
+            caption=img.caption,
+            media_type=img.media_type,
+            sha256=img.sha256,
+            size=len(img.data),
+        )
+
+    def appearance_view() -> AppearanceView:
+        return AppearanceView(
+            name=appearance.name,
+            description=appearance.description,
+            avatar=image_info(appearance.avatar) if appearance.avatar else None,
+            images=[image_info(img) for img in appearance.images],
+        )
+
+    def image(image_id: str) -> ImageData | None:
+        img = appearance.get(image_id)
+        return ImageData(info=image_info(img), data=img.data) if img is not None else None
+
     host.set_state_provider(state)
     host.set_memory_provider(memory_view)
+    host.set_appearance_provider(appearance_view, image)
     await persona.start()
     await host.start()
     print(f"{profile.name} 已启动：http://127.0.0.1:{port}  （实例：{instance.root}）")
