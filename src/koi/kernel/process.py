@@ -278,6 +278,8 @@ class ProcessPlugin:
                 return None
             case "koi/state":
                 return await ctx.state()
+            case "koi/memory":
+                return (await ctx.memory_view()).model_dump(mode="json")
             case "koi/approval/request":
                 return {"id": await ctx.request_approval(ApprovalRequest.model_validate(params))}
             case "koi/approvals":

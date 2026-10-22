@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -289,6 +290,70 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         owner_call=profile.owner_call,
     )
 
+    def _iso(value: datetime | None) -> str | None:
+        return value.isoformat() if value is not None else None
+
+    def _sleep_view() -> dict[str, Any]:
+        now = clock.now()
+        alarms = sorted(
+            (alarm for alarm in persona.state.alarms.values() if alarm.at >= now),
+            key=lambda alarm: alarm.at,
+        )
+        next_alarm = alarms[0] if alarms else None
+        return {
+            "awake_since": _iso(persona.state.awake_since),
+            "interrupted": persona.state.interrupted_sleep,
+            "episodes": [
+                {
+                    "onset": _iso(episode.onset),
+                    "wake": _iso(episode.wake),
+                    "wake_reason": episode.wake_reason.value if episode.wake_reason else None,
+                }
+                for episode in persona.state.episodes[-8:]
+            ],
+            "next_wake": (
+                {"at": next_alarm.at.isoformat(), "reason": next_alarm.reason}
+                if next_alarm is not None
+                else None
+            ),
+        }
+
+    def memory_view() -> dict[str, Any]:
+        shared = params.mind.share_memory
+        diaries = persona.memory.diaries
+        inbox = persona.memory.inbox
+        entries: list[dict[str, Any]] = []
+        if shared:
+            for diary in sorted(diaries, key=lambda item: item.meta.date, reverse=True)[:10]:
+                meta = diary.meta
+                body = diary.body
+                if len(body) > 1500:
+                    body = body[:1500] + "……"
+                entries.append(
+                    {
+                        "date": meta.date.isoformat(),
+                        "importance": meta.importance,
+                        "mood_v": meta.mood_v,
+                        "mood_a": meta.mood_a,
+                        "mood_peak": meta.mood_peak,
+                        "people": meta.people,
+                        "tags": meta.tags,
+                        "summary": meta.summary,
+                        "body": body,
+                    }
+                )
+        notebook = persona.memory.notebook if shared else ""
+        if len(notebook) > 4000:
+            notebook = notebook[:4000] + "……"
+        return {
+            "shared": shared,
+            "diaries": len(diaries),
+            "pending_notes": len(inbox),
+            "entries": entries,
+            "notebook": notebook,
+            "notes": inbox[:50] if shared else [],
+        }
+
     def state() -> dict[str, Any]:
         return {
             "name": profile.name,
@@ -298,7 +363,9 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
             "memory": {
                 "diaries": len(persona.memory.diaries),
                 "pending_notes": len(persona.memory.inbox),
+                "shared": params.mind.share_memory,
             },
+            "sleep": _sleep_view(),
             "plugins": {
                 pid: getattr(host.get(pid), "status", "running") for pid in host.plugin_ids
             },
@@ -307,6 +374,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         }
 
     host.set_state_provider(state)
+    host.set_memory_provider(memory_view)
     await persona.start()
     await host.start()
     print(f"{profile.name} 已启动：http://127.0.0.1:{port}  （实例：{instance.root}）")

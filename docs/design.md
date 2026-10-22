@@ -537,7 +537,7 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 
 ### 6.8 进程内插件与 Web 对话插件
 
-插件只依赖 `koi.protocol`：`Manifest`（id、能力列表、`max_trust`、`permissions`）、`EventIn`、`PluginContext`（`emit`、`state`、`request_approval`，以及需要 `approve` 权限的 `approvals`、`resolve_approval`、`audit`）和 `Plugin`（`start`、`stop`、`call`、`on_approval`）。内核的 `PluginHost` 负责：
+插件只依赖 `koi.protocol`：`Manifest`（id、能力列表、`max_trust`、`permissions`）、`EventIn`、`PluginContext`（`emit`、`state`、`request_approval`、需要 `owner_ui` 权限的 `memory_view`，以及需要 `approve` 权限的 `approvals`、`resolve_approval`、`audit`）和 `Plugin`（`start`、`stop`、`call`、`on_approval`）。内核的 `PluginHost` 负责：
 
 - `emit`：按 manifest 的 `max_trust` 降低信任级别，把 `source` 强制设为插件 ID，然后异步发布到总线，不阻塞插件。
 - `call(plugin_id, capability, args)`：只允许调用 manifest 里声明过的能力。人格体通过 actuator 调用 `send_message` 回复。
@@ -550,13 +550,16 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 | `POST /api/messages` | 主人发消息，返回 202，产生 P0、owner 信任的 `owner_message` 事件 |
 | `GET /api/stream` | SSE 推送人格体的回复 |
 | `GET /api/history` | 本次运行的对话历史（只在内存中） |
-| `GET /api/state` | 状态快照 |
+| `GET /api/state` | 状态快照（含睡眠片段、醒着起点、下一次闹钟） |
+| `GET /api/memory` | 只读记忆视图（需要 `owner_ui`）；`mind.share_memory` 关闭时只有数量 |
 
 | `GET /api/approvals` | 待处理的审批 |
 | `POST /api/approvals/{id}` | 批准或拒绝（`{"approved": true}`），已处理过的返回 409 |
 | `GET /api/audit` | 最近的工具调用记录 |
 
 除了检查客户端地址，还检查 `Host` 头必须是 `127.0.0.1`、`::1` 或 `localhost`，防止 DNS 重绑定：恶意网页把自己的域名解析到 127.0.0.1 后，浏览器发来的 Host 仍是它的域名。界面侧栏有"等你批准"卡片（批准 / 拒绝按钮）和可折叠的"操作记录"。
+
+`GET /api/memory` 需要 `owner_ui` 权限，且核心侧的 `mind.share_memory` 默认关闭：关闭时只返回日记与待整理的数量，打开后才返回最近 10 篇日记正文（单篇截断到约 1500 字）和笔记本。日记正文只进入主人界面，不会写进事件、日志或审计。
 
 启动：`koi run [DIR] [--port N] [--model deepseek-chat] [--no-harness] [-v]`（见 §6.10），然后打开界面。API key 从用户变量 `CHAT_DEEPSEEK` 读取，日志经 `RedactingFilter` 脱敏。
 
@@ -573,6 +576,7 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 | | `koi/shutdown` | 优雅退出（Windows 没有可用的 SIGTERM） |
 | 插件 → 核心 | `koi/event` | 上报事件 |
 | | `koi/state` | 读取状态快照 |
+| | `koi/memory` | 读取日记与笔记本的只读视图（需要 `owner_ui`；正文受 `mind.share_memory` 控制） |
 | | `koi/approval/request` | 发起审批，立即返回审批 ID |
 | | `koi/approvals`、`koi/approval/resolve`、`koi/audit` | 需要 `approve` 权限（目前只有 Web 插件有） |
 | | `koi/interaction/request`、`update`、`close` | 请主人扫码、填写（需要 `interact` 权限），见下文"交互请求" |

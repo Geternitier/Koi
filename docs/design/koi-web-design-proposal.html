@@ -2382,8 +2382,8 @@ table.data td code { font-size: 10px; }
             <tr><td>操作记录</td><td><code>GET /api/audit?limit=30</code></td><td><span class="tag-ok">已有</span></td><td>进入“记录”视图时才加载；支持按成功 / 失败筛选。</td></tr>
             <tr><td>插件状态</td><td><code>state.plugins</code></td><td><span class="tag-ok">已有</span></td><td>只有运行字符串；重启次数、版本与日志需要新增。</td></tr>
             <tr><td>LLM 用量</td><td><code>state.llm.calls / cache_hit_rate</code></td><td><span class="tag-ok">已有</span></td><td>放在“记录”页脚，不进入聊天主界面。</td></tr>
-            <tr><td>记忆（日记 / 笔记）</td><td><code>state.memory</code> 只有计数</td><td><span class="tag-warn">缺少接口</span></td><td>Phase 2 新增只读 API；默认只读、可关闭、敏感内容不返回。</td></tr>
-            <tr><td>睡眠日程 / 下次醒来</td><td><code>snapshot</code> 不含 episodes / alarms</td><td><span class="tag-warn">缺少接口</span></td><td>Phase 2 暴露最近 24h 的睡眠片段与下一个闹钟；否则显示“未知”。</td></tr>
+            <tr><td>记忆（日记 / 笔记）</td><td><code>GET /api/memory</code>（需要 <code>owner_ui</code>）</td><td><span class="tag-ok">已接入</span></td><td>仅在 <code>mind.share_memory: true</code> 时下发正文；默认只给数量，最多最近 10 篇。</td></tr>
+            <tr><td>睡眠日程 / 下次醒来</td><td><code>state.sleep</code>（episodes / awake_since / next_wake）</td><td><span class="tag-ok">已接入</span></td><td>状态页据此画当天 24 小时睡/醒轨道；核心没有数据时显示提示。</td></tr>
             <tr><td>消息 ID / 分页</td><td><code>GET /api/history</code> 仅返回 200 条无 ID</td><td><span class="tag-new">建议新增</span></td><td>加稳定 <code>id</code> 与 <code>before</code> 游标，重连去重、长对话回溯都依赖它。</td></tr>
             <tr><td>状态推送</td><td>客户端每 5s 轮询 <code>/api/state</code></td><td><span class="tag-new">建议新增</span></td><td>SSE 增加 <code>state</code> 事件（1–2s 节流）；页面隐藏时暂停轮询。</td></tr>
           </tbody>
@@ -2392,7 +2392,7 @@ table.data td code { font-size: 10px; }
 
       <div class="callout">
         <svg class="i"><use href="#i-info"/></svg>
-        <div><b>兼容策略：</b>Phase 1 不新增任何后端字段。缺数据时显示“未知 / 暂不可用”，而不是编造数字；记忆与日程等能力在 Phase 2 通过新增只读接口接入。所有新增接口都必须遵守现有的本机校验与 Host 头校验。</div>
+        <div><b>兼容策略：</b>Phase 1 不新增任何后端字段。缺数据时显示“未知 / 暂不可用”，而不是编造数字；Phase 2 已接入 <code>state.sleep</code> 与受 <code>owner_ui</code> 保护的 <code>/api/memory</code>。消息 ID 与状态 SSE 仍留作下一步。所有新增接口都必须遵守现有的本机校验与 Host 头校验。</div>
       </div>
     </div>
   </section>

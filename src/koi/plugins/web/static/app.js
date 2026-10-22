@@ -736,6 +736,60 @@
       + "</svg>";
   }
 
+  function wakeLabel(value) {
+    const date = dateOf(value);
+    if (!date) return "";
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    if (date.toDateString() === now.toDateString()) return timeOf(value);
+    if (date.toDateString() === tomorrow.toDateString()) return "明天 " + timeOf(value);
+    return (date.getMonth() + 1) + " 月 " + date.getDate() + " 日 " + timeOf(value);
+  }
+
+  function sleepTrackHTML(sleep, snapshot) {
+    const now = new Date();
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    const pct = (value) => {
+      const date = value instanceof Date ? value : dateOf(value);
+      if (!date) return 0;
+      return clamp(((date.getTime() - start.getTime()) / (end.getTime() - start.getTime())) * 100, 0, 100);
+    };
+    const episodes = Array.isArray(sleep.episodes) ? sleep.episodes : [];
+    const blocks = episodes.map((episode) => {
+      const onset = dateOf(episode.onset);
+      if (!onset) return "";
+      const wake = episode.wake ? dateOf(episode.wake) : now;
+      if (!wake) return "";
+      const leftTime = new Date(Math.max(onset.getTime(), start.getTime()));
+      const rightTime = new Date(Math.min(wake.getTime(), end.getTime()));
+      if (rightTime.getTime() <= leftTime.getTime()) return "";
+      const left = pct(leftTime);
+      const width = Math.max(0.4, pct(rightTime) - left);
+      return '<span class="k-span sleep' + (episode.wake ? "" : " current") + '" style="left:'
+        + left.toFixed(2) + "%;width:" + width.toFixed(2) + '%"></span>';
+    }).join("");
+    const last = episodes.length ? episodes[episodes.length - 1] : null;
+    const awake = sleep.awake_since
+      ? "醒着 · 从 " + timeOf(sleep.awake_since) + " 起"
+      : snapshot && snapshot.status === "sleeping"
+        ? "正在睡"
+        : "还没有醒着的记录";
+    const next = sleep.next_wake
+      ? " · 下一次闹钟 " + wakeLabel(sleep.next_wake.at)
+      : "";
+    const interrupted = sleep.interrupted ? " · 被提前叫醒" : "";
+    return '<div class="k-daytrack"><div class="k-track">' + blocks + "</div>"
+      + '<span class="k-now" style="left:' + pct(now).toFixed(2) + '%"></span>'
+      + '<div class="k-ticks"><span>00</span><span>04</span><span>08</span><span>12</span><span>16</span><span>20</span><span>24</span></div></div>'
+      + '<div class="k-legend"><span><i class="water"></i>醒着</span><span><i style="background:var(--k-sleep)"></i>睡着</span><span><i style="background:var(--k-koi)"></i>现在</span></div>'
+      + '<p class="k-sleep-summary">' + esc(awake + next + interrupted) + "</p>"
+      + (episodes.length ? "" : '<div class="k-notice">还没有睡眠片段；可能是刚启动，或核心尚未记录。</div>');
+  }
+
   function renderStatus() {
     const snapshot = state.snapshot;
     if (!snapshot) {
@@ -760,12 +814,17 @@
     const plugins = Object.entries(state.plugins || {});
     const running = plugins.filter((entry) => entry[1] === "running").length;
     const lastOwner = relative(snapshot.last_owner_at);
+    const sleepCard = state.sleep
+      ? '<section class="k-card span2"><div class="k-card-head"><h3>今天 · 睡与醒</h3><small>'
+        + esc(dayLabel(snapshot.time).replace(/^今天 · /, "")) + "</small></div>" + sleepTrackHTML(state.sleep, snapshot) + "</section>"
+      : "";
 
     els.statusPage.innerHTML =
       '<div class="k-page-head"><div><h2>她的此刻</h2><p>不是仪表盘，是一张可以读懂的生活切片。</p></div>'
       + '<button class="k-btn" data-go="chat"><svg class="i"><use href="#i-arrow-back"/></svg> 回到对话</button></div>'
       + '<div class="k-status-note">当前状态 · ' + esc(statusWord()) + '</div>'
       + '<div class="k-grid2">'
+      + sleepCard
       + '<section class="k-card span2"><div class="k-card-head"><h3>精力</h3><small>本次打开以来</small></div>'
       + '<div class="k-stat-row"><div><span class="k-big">' + Math.round(energy) + '<small>/ 100</small></span><p>' + esc(energyHeadline(snapshot)) + "</p></div>"
       + '<div><span class="k-big">' + pressure.toFixed(2) + '<small>/ ' + upper.toFixed(2) + '</small></span><p>困意与睡眠阈值</p></div>'
@@ -801,20 +860,96 @@
       + "</section></div>";
   }
 
+  function memoryMoodWord(v, a) {
+    if (v >= 0.25) return a >= 0.2 ? "雀跃" : "开心";
+    if (v <= -0.25) return "低落";
+    return "平静";
+  }
+
+  function diaryCard(entry) {
+    const date = new Date(String(entry.date || "") + "T00:00:00");
+    const dateText = Number.isNaN(date.getTime())
+      ? String(entry.date || "")
+      : date.toLocaleDateString("zh-CN", { month: "long", day: "numeric" });
+    const tags = [...(entry.tags || []), ...(entry.people || [])]
+      .filter(Boolean)
+      .map((tag) => '<span class="k-tag">' + esc(tag) + "</span>")
+      .join("");
+    return '<article class="k-diary-item' + (entry.importance === "important" ? " important" : "") + '">'
+      + "<header><time>" + esc(dateText) + "</time><b>" + esc(entry.summary || "这一天") + "</b>"
+      + (entry.importance === "important" ? '<span class="k-tag risk">重要</span>' : "")
+      + '<span class="mood">' + esc(memoryMoodWord(Number(entry.mood_v) || 0, Number(entry.mood_a) || 0)) + "</span></header>"
+      + "<p>" + fmt(entry.body || entry.summary || "") + "</p>"
+      + (tags ? '<div class="k-diary-meta">' + tags + "</div>" : "")
+      + "</article>";
+  }
+
   function renderMemory() {
+    const view = state.memoryView;
     const memory = state.memory || {};
-    const diaries = Number(memory.diaries) || 0;
-    const notes = Number(memory.pending_notes) || 0;
-    els.memoryPage.innerHTML =
-      '<div class="k-page-head"><div><h2>她记得的</h2><p>日记、笔记，以及那些她愿意给你看的部分。</p></div>'
-      + '<button class="k-btn" data-go="chat"><svg class="i"><use href="#i-arrow-back"/></svg> 回到对话</button></div>'
-      + '<div class="k-empty-page">' + medallionHTML(80, state.initial)
-      + "<h3>日记还锁着</h3>"
-      + "<p>她已经写下一些东西，但核心目前只向网页暴露数量。这里不会用假日记填满页面；等只读接口就位，再让她自己决定给你看哪一页。</p>"
-      + '<div class="k-memory-grid"><div class="k-card"><span class="k-big">' + diaries + '</span><p>篇日记</p></div>'
-      + '<div class="k-card"><span class="k-big">' + notes + '</span><p>条待整理</p></div></div>'
-      + "</div>"
-      + '<div class="k-notice"><b>Phase 2：</b>记忆浏览需要核心提供只读接口，并默认只展示她愿意分享的内容。现在这个页面负责如实说明边界，而不是编故事。</div>';
+    const shared = view ? Boolean(view.shared) : Boolean(memory.shared);
+    const diaries = Number(view ? view.diaries : memory.diaries) || 0;
+    const notesCount = Number(view ? view.pending_notes : memory.pending_notes) || 0;
+    const head = '<div class="k-page-head"><div><h2>她记得的</h2><p>日记、笔记，以及那些她愿意给你看的部分。</p></div>'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      + '<button class="k-btn" data-action="refresh-memory"><svg class="i"><use href="#i-refresh"/></svg> 刷新</button>'
+      + '<button class="k-btn" data-go="chat"><svg class="i"><use href="#i-arrow-back"/></svg> 回到对话</button></div></div>';
+
+    if (state.memoryLoading && !view) {
+      els.memoryPage.innerHTML = head
+        + '<div class="k-empty-page">' + medallionHTML(80, state.initial)
+        + "<h3>正在翻她的日记</h3><p>只读，不会改动任何内容。</p></div>";
+      return;
+    }
+    if (state.memoryError && !view) {
+      els.memoryPage.innerHTML = head
+        + '<div class="k-empty-page">' + medallionHTML(80, state.initial)
+        + "<h3>日记暂时打不开</h3><p>" + esc(state.memoryError) + "</p>"
+        + '<button class="k-btn" data-action="refresh-memory">再试一次</button></div>';
+      return;
+    }
+
+    if (!shared) {
+      els.memoryPage.innerHTML = head
+        + '<div class="k-empty-page">' + medallionHTML(80, state.initial)
+        + "<h3>日记还锁着</h3>"
+        + "<p>她已经写下一些东西，但还没有允许网页查看正文。这里只显示数量，不会用假日记填满页面。</p>"
+        + '<div class="k-memory-grid"><div class="k-card"><span class="k-big">' + diaries + '</span><p>篇日记</p></div>'
+        + '<div class="k-card"><span class="k-big">' + notesCount + '</span><p>条待整理</p></div></div>'
+        + "</div>"
+        + '<div class="k-notice"><b>怎么打开：</b>在实例的 <code>data/persona/params.yaml</code> 里把 '
+        + "<code>mind.share_memory</code> 设为 <code>true</code>，重启后她会把最近 10 篇日记和笔记本交给网页只读展示。"
+        + "默认关闭，是为了让“给你看”仍然是一个选择。</div>";
+      return;
+    }
+
+    const entries = Array.isArray(view && view.entries) ? view.entries : [];
+    const notebook = view && view.notebook ? String(view.notebook) : "";
+    const notes = Array.isArray(view && view.notes) ? view.notes : [];
+    const shown = entries.length;
+    const sharedNote = diaries
+      ? "她愿意给你看的 · 共 " + diaries + " 篇" + (shown < diaries ? "，展示最近 " + shown + " 篇" : "")
+      : "她还没有写下日记";
+    const diaryHTML = entries.length
+      ? '<div class="k-diary">' + entries.map(diaryCard).join("") + "</div>"
+      : '<div class="k-quiet">她还没有写下可以被你看到的日记。</div>';
+    const noteHTML = notes.length
+      ? notes.map((note, index) => '<div class="k-note"><span class="no">' + String(index + 1).padStart(2, "0")
+        + "</span><span>" + fmt(note) + "</span></div>").join("")
+      : '<div class="k-quiet">待整理区是空的。</div>';
+    els.memoryPage.innerHTML = head
+      + '<div class="k-status-note">' + esc(sharedNote) + "</div>"
+      + '<div class="k-grid2">'
+      + '<section class="k-card span2"><div class="k-card-head"><h3>最近的日记</h3><small>' + shown + " / " + diaries + " 篇</small></div>"
+      + diaryHTML + "</section>"
+      + '<section class="k-card"><div class="k-card-head"><h3>笔记本</h3><small>整理过的长期记忆</small></div>'
+      + (notebook ? '<div class="k-notebook">' + fmt(notebook) + "</div>" : '<div class="k-quiet">还没有整理好的笔记。</div>')
+      + "</section>"
+      + '<section class="k-card"><div class="k-card-head"><h3>待整理</h3><small>' + notes.length + " 条</small></div>"
+      + '<div class="k-notes">' + noteHTML + "</div></section>"
+      + '<section class="k-card span2"><div class="k-card-head"><h3>关于这份记忆</h3><small>read only</small></div>'
+      + "<p>这里是只读视图：网页不会修改、删除或触发她的回忆。正文最多展示最近 10 篇，单篇截断到约 1500 字；其余仍然留在她的数据目录里。</p></section>"
+      + "</div>";
   }
 
   function pluginRows() {
@@ -907,6 +1042,7 @@
     state.thought = data.thought || null;
     state.llm = data.llm || {};
     state.memory = data.memory || {};
+    state.sleep = data.sleep || null;
     state.plugins = data.plugins || {};
     state.serverPending = {
       approvals: Number(data.pending_approvals) || 0,
@@ -992,6 +1128,23 @@
     } finally {
       state.auditBusy = false;
       if (state.view === "records") renderRecords();
+    }
+  }
+
+  async function loadMemory() {
+    if (state.memoryLoading) return;
+    state.memoryLoading = true;
+    state.memoryError = "";
+    if (state.view === "memory") renderMemory();
+    try {
+      state.memoryView = await api("/api/memory");
+    } catch (err) {
+      state.memoryView = null;
+      state.memoryError = err.message;
+      toast("读取记忆失败：" + err.message, "warn");
+    } finally {
+      state.memoryLoading = false;
+      if (state.view === "memory") renderMemory();
     }
   }
 
@@ -1383,7 +1536,10 @@
     closeSide();
     closePop();
     if (view === "status") renderStatus();
-    if (view === "memory") renderMemory();
+    if (view === "memory") {
+      renderMemory();
+      loadMemory();
+    }
     if (view === "records") {
       renderRecords();
       loadAudit().catch(() => {});
@@ -1547,6 +1703,10 @@
     const action = event.target.closest("[data-action]");
     if (action && action.dataset.action === "refresh-audit") {
       loadAudit();
+      return;
+    }
+    if (action && action.dataset.action === "refresh-memory") {
+      loadMemory();
     }
   });
 
@@ -1647,6 +1807,10 @@
     auditFilter: "all",
     auditBusy: false,
     auditError: "",
+    memoryView: null,
+    memoryLoading: false,
+    memoryError: "",
+    sleep: null,
     pendingLoaded: false,
     serverPending: { approvals: 0, interactions: 0 },
     samples: [],

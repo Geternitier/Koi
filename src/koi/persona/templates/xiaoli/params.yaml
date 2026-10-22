@@ -11,3 +11,4 @@ will:
   strong_insist_limit: 2      # 主人强烈要求几次后必须照做（1–3）
 mind:
   show_thoughts: true         # 状态页是否显示内心独白
+  share_memory: false         # 网页是否展示日记与笔记正文；默认只看数量

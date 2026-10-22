@@ -185,6 +185,14 @@ class WebPlugin:
         async def state() -> dict[str, Any]:
             return await self.ctx.state()
 
+        @app.get("/api/memory")
+        async def memory() -> dict[str, Any]:
+            try:
+                snapshot = await self.ctx.memory_view()
+            except Exception as e:
+                raise HTTPException(503, str(e)) from None
+            return snapshot.model_dump(mode="json")
+
         @app.get("/api/approvals")
         async def approvals() -> list[dict[str, Any]]:
             return [a.model_dump(mode="json") for a in await self.ctx.approvals()]

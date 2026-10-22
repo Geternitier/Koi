@@ -22,6 +22,7 @@ from koi.protocol import (
     EventIn,
     Interaction,
     InteractionRequest,
+    MemorySnapshot,
     Plugin,
 )
 from koi.protocol.rpc import METHOD_NOT_FOUND, RpcError, RpcPeer
@@ -43,6 +44,9 @@ class RemoteContext:
 
     async def state(self) -> dict[str, Any]:
         return await self._peer.request("koi/state")
+
+    async def memory_view(self) -> MemorySnapshot:
+        return MemorySnapshot.model_validate(await self._peer.request("koi/memory"))
 
     async def request_approval(self, request: ApprovalRequest) -> str:
         result = await self._peer.request("koi/approval/request", request.model_dump())
