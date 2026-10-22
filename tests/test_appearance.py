@@ -207,3 +207,43 @@ async def test_web_serves_avatar():
             assert r.headers["x-content-type-options"] == "nosniff"
     assert "appearance" in WebPlugin().manifest.permissions
     assert Capability(name="x").tool  # 协议包仍然可以单独导入
+
+
+def test_self_portraits_prefers_avatar_and_skips_large_images():
+    from koi.app import SELF_IMAGE_MAX_BYTES, self_portraits
+
+    avatar = Image(
+        id="avatar",
+        kind="avatar",
+        file="avatar.png",
+        caption="头像",
+        media_type="image/png",
+        sha256="a",
+        data=png(),
+    )
+    small = Image(
+        id="ref-1",
+        kind="reference",
+        file="images/a.png",
+        caption="全身",
+        media_type="image/png",
+        sha256="b",
+        data=png(),
+    )
+    big = Image(
+        id="ref-2",
+        kind="reference",
+        file="images/b.png",
+        caption="大图",
+        media_type="image/png",
+        sha256="c",
+        data=b"0" * (SELF_IMAGE_MAX_BYTES + 1),
+    )
+    appearance = Appearance(name="小鲤", avatar=avatar, images=(small, big))
+    assert [item.caption for item in self_portraits(appearance, 2)] == [
+        "这是你（头像）",
+        "这是你（全身）",
+    ]
+    assert [item.caption for item in self_portraits(appearance, 1)] == ["这是你（头像）"]
+    assert self_portraits(appearance, 0) == []
+    assert self_portraits(Appearance(name="小鲤"), 2) == []

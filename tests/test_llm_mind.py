@@ -12,6 +12,7 @@ from koi.persona import Journal, Persona, PersonaParams, PersonaProfile, Status,
 from koi.persona.llm_mind import ActOutput, LLMMind, PerceiveOutput
 from koi.persona.mind import SeenImage
 from koi.persona.params import AffectParams, SleepParams
+from koi.persona.prompt import system_prompt
 
 TZ = timezone(timedelta(hours=8))
 T0 = datetime(2026, 10, 20, 10, tzinfo=TZ)
@@ -307,3 +308,50 @@ async def test_vision_model_is_used_only_with_images():
     await mind.act(ctx, [])
     assert llm.calls[0]["model"] == "vision-model"
     assert llm.calls[1]["model"] == "text-model"
+
+
+def test_system_prompt_includes_appearance_and_identity_rules():
+    profile = PROFILE.model_copy(update={"appearance": "栗棕色长卷发，圆眼睛。"})
+    text = system_prompt(profile)
+    assert "# 你的样子" in text
+    assert "栗棕色长卷发" in text
+    assert "以主人说的为准" in text
+    assert "# 你的样子" not in system_prompt(PROFILE)
+
+
+class _MessageLLM:
+    def __init__(self) -> None:
+        self.messages: list[list[dict[str, Any]]] = []
+
+    async def chat_json(self, messages, schema, **kwargs):
+        self.messages.append(list(messages))
+        return schema.model_validate({"replies": []}), USAGE
+
+
+async def test_self_images_are_attached_only_when_looking_at_images():
+    llm = _MessageLLM()
+    portrait = SeenImage(
+        caption="这是你（头像）", media_type="image/png", data=b"\x89PNG\r\n\x1a\n"
+    )
+    mind = LLMMind(llm, PROFILE, PARAMS.mind, self_images=[portrait])
+    clock = SimClock(T0)
+    persona = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=mind,
+        journal=Journal(),
+    )
+    ctx = persona._context(WakeReason.OWNER, [], [])
+    image = SeenImage(caption="主人发来的图片", media_type="image/png", data=b"\x89PNG\r\n\x1a\n")
+    await mind.act(ctx.model_copy(update={"images": [image]}), [])
+    content = llm.messages[0][1]["content"]
+    assert isinstance(content, list)
+    texts = [part.get("text") for part in content if part.get("type") == "text"]
+    assert any("下面是你自己的照片" in text for text in texts)
+    assert sum(part.get("type") == "image_url" for part in content) == 2
+
+    # 没有新图片时不附自己的照片
+    await mind.act(ctx, [])
+    assert isinstance(llm.messages[1][1]["content"], str)

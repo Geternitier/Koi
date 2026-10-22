@@ -103,15 +103,28 @@ class LLMMind:
         *,
         calm_threshold: float = 0.12,
         redact: Callable[[str], str] | None = None,
+        self_images: list[SeenImage] | None = None,
     ) -> None:
         self.llm = llm
         self.profile = profile
         self.params = params
         self.calm_threshold = calm_threshold
         self._redact = redact or (lambda s: s)
+        self._self_images = list(self_images or [])
         self._system = system_prompt(profile)
         # 模型明确拒绝过图片后，这个进程不再附图，省得每次多一次失败的调用
         self._vision_off = False
+
+    @staticmethod
+    def _append_image(parts: list[dict[str, Any]], image: SeenImage) -> None:
+        encoded = base64.b64encode(image.data).decode("ascii")
+        parts.append({"type": "text", "text": image.caption})
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{image.media_type};base64,{encoded}"},
+            }
+        )
 
     def _messages(self, user: str, images: list[SeenImage] | None = None) -> list[dict[str, Any]]:
         text = self._redact(user)
@@ -119,14 +132,17 @@ class LLMMind:
         if images:
             parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
             for image in images:
-                encoded = base64.b64encode(image.data).decode("ascii")
-                parts.append({"type": "text", "text": image.caption})
+                self._append_image(parts, image)
+            # 自己的登记图只在她看图时附上，用来对照照片里的人是不是自己
+            if self._self_images:
                 parts.append(
                     {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{image.media_type};base64,{encoded}"},
+                        "type": "text",
+                        "text": "下面是你自己的照片，用来对照前面照片里的人是不是你：",
                     }
                 )
+                for image in self._self_images:
+                    self._append_image(parts, image)
             content = parts
         return [
             {"role": "system", "content": self._system},

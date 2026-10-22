@@ -55,7 +55,7 @@ from koi.persona import (
     load_profile,
     templates,
 )
-from koi.persona.appearance import Image, load_appearance
+from koi.persona.appearance import Appearance, Image, load_appearance
 from koi.persona.core import STATE_KEY
 from koi.persona.llm_mind import LLMMind
 from koi.persona.mind import SeenImage
@@ -122,6 +122,35 @@ def harness_spec(instance: Instance, registry: Registry) -> PluginSpec:
         settings=settings,
         cwd=str(paths.workspace),
     )
+
+
+# 带图时附给她的自己的照片，单张不超过这个大小（大图 base64 太重）
+SELF_IMAGE_MAX_BYTES = 300_000
+
+
+def self_portraits(appearance: Appearance, limit: int) -> list[SeenImage]:
+    """她看图时附上的自己的照片：头像优先，再按顺序补参考图。"""
+    count = max(0, limit)
+    if count == 0:
+        return []
+    chosen: list[SeenImage] = []
+    candidates: list[Image] = []
+    if appearance.avatar is not None:
+        candidates.append(appearance.avatar)
+    candidates.extend(appearance.images)
+    for image in candidates:
+        if len(chosen) >= count:
+            break
+        if len(image.data) > SELF_IMAGE_MAX_BYTES:
+            continue
+        chosen.append(
+            SeenImage(
+                caption=f"这是你（{image.caption or image.id}）",
+                media_type=image.media_type,
+                data=image.data,
+            )
+        )
+    return chosen
 
 
 def setup_logging(paths: KoiPaths, redactor: Redactor, verbose: bool) -> None:
@@ -300,6 +329,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         params.mind,
         calm_threshold=params.affect.calm_threshold,
         redact=redactor,
+        self_images=self_portraits(appearance, params.mind.self_ref_images),
     )
     persona = Persona(
         params,
