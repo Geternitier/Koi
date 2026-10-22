@@ -85,7 +85,13 @@ def _capture(pending: list[Interaction], text: str) -> Interaction | None:
 
 
 class WebPlugin:
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765, history: int = 200) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        history: int = 200,
+        history_path: Path | None = None,
+    ) -> None:
         self.host = host
         self.port = port
         self.manifest = Manifest(
@@ -99,12 +105,15 @@ class WebPlugin:
             permissions=["approve", "owner_ui"],
         )
         self.history: deque[dict[str, Any]] = deque(maxlen=history)
+        self._history_path = Path(history_path) if history_path is not None else None
+        self._persisted_lines = 0
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._ctx: PluginContext | None = None
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[None] | None = None
         self._state_task: asyncio.Task[None] | None = None
         self._last_state_sig = ""
+        self._load_history()
 
     # ---------------------------------------------------------------- 插件接口
 
@@ -156,10 +165,83 @@ class WebPlugin:
         for queue in list(self._subscribers):
             queue.put_nowait(event)
 
+    def _load_history(self) -> None:
+        path = self._history_path
+        if path is None or not path.is_file():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            log.warning("读取聊天记录失败：%s", path, exc_info=True)
+            return
+        items: list[dict[str, Any]] = []
+        dirty = False
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except (TypeError, ValueError):
+                dirty = True
+                continue
+            if (
+                not isinstance(item, dict)
+                or item.get("role") not in {"owner", "koi", "system"}
+                or not isinstance(item.get("text"), str)
+                or not item["text"]
+            ):
+                dirty = True
+                continue
+            if not item.get("id"):
+                item["id"] = uuid4().hex
+                dirty = True
+            items.append(item)
+        limit = self.history.maxlen
+        keep = items if limit is None else (items[-limit:] if limit > 0 else [])
+        if len(keep) != len(items):
+            dirty = True
+        self.history.extend(keep)
+        self._persisted_lines = len(items)
+        if dirty:
+            self._rewrite_history()
+
+    def _rewrite_history(self) -> None:
+        path = self._history_path
+        if path is None:
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tmp.open("w", encoding="utf-8") as file:
+                for item in self.history:
+                    file.write(json.dumps(item, ensure_ascii=False) + "\n")
+            tmp.replace(path)
+            self._persisted_lines = len(self.history)
+        except OSError:
+            log.warning("重写聊天记录失败：%s", path, exc_info=True)
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+    def _append_history(self, item: dict[str, Any]) -> None:
+        path = self._history_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(item, ensure_ascii=False) + "\n")
+            self._persisted_lines += 1
+            limit = self.history.maxlen or 200
+            if self._persisted_lines > max(400, limit * 2):
+                self._rewrite_history()
+        except OSError:
+            log.warning("写入聊天记录失败：%s", path, exc_info=True)
+
     def _publish(self, message: dict[str, Any]) -> None:
         item = dict(message)
         item.setdefault("id", uuid4().hex)
         self.history.append(item)
+        self._append_history(item)
         self._broadcast({"kind": "message", "data": item})
 
     async def _state_loop(self) -> None:

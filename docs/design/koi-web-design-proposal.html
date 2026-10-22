@@ -2384,7 +2384,7 @@ table.data td code { font-size: 10px; }
             <tr><td>LLM 用量</td><td><code>state.llm.calls / cache_hit_rate</code></td><td><span class="tag-ok">已有</span></td><td>放在“记录”页脚，不进入聊天主界面。</td></tr>
             <tr><td>记忆（日记 / 笔记）</td><td><code>GET /api/memory</code>（需要 <code>owner_ui</code>）</td><td><span class="tag-ok">已接入</span></td><td>仅在 <code>mind.share_memory: true</code> 时下发正文；默认只给数量，最多最近 10 篇。</td></tr>
             <tr><td>睡眠日程 / 下次醒来</td><td><code>state.sleep</code>（episodes / awake_since / next_wake）</td><td><span class="tag-ok">已接入</span></td><td>状态页据此画当天 24 小时睡/醒轨道；核心没有数据时显示提示。</td></tr>
-            <tr><td>消息 ID / 分页</td><td><code>GET /api/history?limit=60&amp;before=&lt;id&gt;</code></td><td><span class="tag-ok">已接入</span></td><td>每条消息有稳定 <code>id</code>；返回 <code>messages / has_more / next_before</code>，聊天顶部可加载更早。</td></tr>
+            <tr><td>消息 ID / 分页</td><td><code>GET /api/history?limit=60&amp;before=&lt;id&gt;</code></td><td><span class="tag-ok">已接入</span></td><td>每条消息有稳定 <code>id</code>；返回 <code>messages / has_more / next_before</code>，最近 200 条持久化在 <code>data/web/history.jsonl</code>，聊天顶部可加载更早。</td></tr>
             <tr><td>状态推送</td><td>SSE <code>state</code> 命名事件</td><td><span class="tag-ok">已接入</span></td><td>服务端每 2 秒检查状态变化并推送；页面保留 15 秒兜底轮询。</td></tr>
           </tbody>
         </table>

@@ -135,6 +135,23 @@ async def test_web_history_paginates_with_stable_ids():
         assert (await c.get("/api/history?before=missing")).status_code == 404
 
 
+async def test_web_history_survives_restart(tmp_path):
+    path = tmp_path / "history.jsonl"
+    first = WebPlugin(history_path=path)
+    first._ctx = FakeCtx()
+    await first.call("send_message", {"text": "记得我"})
+    await first.call("send_message", {"text": "第二句"})
+
+    again = WebPlugin(history_path=path)
+    again._ctx = FakeCtx()
+    async with client(again) as c:
+        data = (await c.get("/api/history")).json()
+        assert [message["text"] for message in data["messages"]] == ["记得我", "第二句"]
+        assert all(message.get("id") for message in data["messages"])
+        assert data["has_more"] is False
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+
 async def test_web_state_loop_pushes_named_state_events():
     plugin = WebPlugin()
     plugin._ctx = FakeCtx()

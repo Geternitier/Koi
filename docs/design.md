@@ -549,7 +549,7 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 | `GET /` | 单页聊天界面，侧栏显示状态、心情、精力、好感、内心想法、LLM 调用次数和缓存命中率 |
 | `POST /api/messages` | 主人发消息，返回 202，产生 P0、owner 信任的 `owner_message` 事件 |
 | `GET /api/stream` | SSE 推送回复（消息带稳定 `id`）和 `state` 命名事件；无事件时每 20 秒保活 |
-| `GET /api/history` | 本次运行的对话历史（只在内存中）；`limit` 默认 60，`before=<id>` 向前翻页，返回 `messages`、`has_more`、`next_before` |
+| `GET /api/history` | 最近 200 条对话，持久化在 `data/web/history.jsonl`，重启后仍在；`limit` 默认 60，`before=<id>` 向前翻页，返回 `messages`、`has_more`、`next_before` |
 | `GET /api/state` | 状态快照（含睡眠片段、醒着起点、下一次闹钟） |
 | `GET /api/memory` | 只读记忆视图（需要 `owner_ui`）；`mind.share_memory` 关闭时只有数量 |
 

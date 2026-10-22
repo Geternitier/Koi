@@ -247,7 +247,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         secrets=secrets,
         redactor=redactor,
     )
-    host.add(WebPlugin(port=port))
+    host.add(WebPlugin(port=port, history_path=paths.data / "web" / "history.jsonl"))
     env = scrubbed_env(secrets)
     specs = load_specs(paths.plugins)
     if instance.config.harness and not args.no_harness:

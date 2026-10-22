@@ -77,4 +77,5 @@ docs/design/
 - **Phase 2 已接入真实睡眠片段**：核心在 `/api/state` 中暴露最近 8 段睡眠、醒着起点、下一次闹钟和是否被提前叫醒；状态页据此画出当天 24 小时睡/醒轨道。
 - **Phase 2 已接入只读记忆**：新增 `GET /api/memory`，通过 `owner_ui` 权限校验；只有把 `mind.share_memory` 设为 `true` 才会下发最近 10 篇日记、笔记本与待整理内容，默认仍然只给数量。
 - **消息 ID 与分页**：每条消息带稳定 `id`；`GET /api/history?limit=60&before=<id>` 返回 `messages / has_more / next_before`，聊天顶部可加载更早，加载时保持当前可见消息的滚动位置。
+- **对话记录持久化**：最近 200 条消息写在 `data/web/history.jsonl`，每次写入一行；启动时读回，超过 400 行自动压缩。重启 `koi run` 或重新打开页面都能看到近期对话。
 - **状态 SSE**：`/api/stream` 增加 `state` 命名事件；服务端每 2 秒检查状态变化，页面保留 15 秒兜底轮询，断线时自动回退。

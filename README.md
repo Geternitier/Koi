@@ -65,6 +65,7 @@ koi run
 - "等你处理"：插件请你扫码、填写的内容；
 - "等你批准"：待处理的审批；
 - "操作记录"：她用过的工具；
+- 对话记录：最近 200 条保存在 `data/web/history.jsonl`，重启或重新打开页面后还能看到；
 - 长对话：聊天顶部可加载更早的 60 条；状态变化由 SSE 推送，断开时自动退回轮询。
 
 ## 创建更多人格体
@@ -110,6 +111,7 @@ koi list                                # 本机所有人格体，以及是否�
       profile.md    人设
       params.yaml   性格参数
     memory/         经历记录、日记、笔记本
+    web/history.jsonl  最近 200 条网页对话（本机，重启后仍在）
     plugins/        插件配置
     logs/koi.log
   workspace/        她的工作区
