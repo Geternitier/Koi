@@ -5,7 +5,7 @@
 独立进程运行（JSON-RPC 2.0，见 `koi.protocol.rpc` 与 `koi.protocol.stdio`）。
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -118,6 +118,31 @@ class AuditRecord(BaseModel):
     summary: str
 
 
+class SharedDiary(BaseModel):
+    """主人界面上可以展示的一篇日记。正文由人格体参数决定是否下发。"""
+
+    date: date
+    importance: str = "normal"
+    mood_v: float = 0.0
+    mood_a: float = 0.0
+    mood_peak: float = 0.0
+    people: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    summary: str = ""
+    body: str = ""
+
+
+class MemorySnapshot(BaseModel):
+    """记忆的只读视图。shared 为 false 时只有数量，不包含正文。"""
+
+    shared: bool = False
+    diaries: int = 0
+    pending_notes: int = 0
+    entries: list[SharedDiary] = Field(default_factory=list)
+    notebook: str = ""
+    notes: list[str] = Field(default_factory=list)
+
+
 class PluginContext(Protocol):
     @property
     def plugin_id(self) -> str: ...
@@ -128,6 +153,10 @@ class PluginContext(Protocol):
 
     async def state(self) -> dict[str, Any]:
         """核心状态的只读视图。"""
+        ...
+
+    async def memory_view(self) -> MemorySnapshot:
+        """日记与笔记本的只读视图（需要 owner_ui 权限）。"""
         ...
 
     async def request_approval(self, request: ApprovalRequest) -> str:
@@ -216,8 +245,10 @@ __all__ = [
     "InteractionRequest",
     "InteractionStatus",
     "Manifest",
+    "MemorySnapshot",
     "Permission",
     "Plugin",
     "PluginContext",
+    "SharedDiary",
     "TrustLevel",
 ]

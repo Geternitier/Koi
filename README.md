@@ -55,14 +55,18 @@ Koi 是一个住在你电脑里的人格体 Agent。她有自己的作息、精�
 koi run
 ```
 
-然后打开 http://127.0.0.1:8765 跟她聊天。在没有实例配置的目录里运行时，启动的是默认的人格体"小鲤"：数据在平台数据目录（Windows `%LOCALAPPDATA%\Koi`，macOS `~/Library/Application Support/Koi`），工作区在"文档/KoiWorkspace"。
+然后打开 http://127.0.0.1:8765 跟她聊天。在没有实例配置的目录里运行时，启动的是默认的人格体"林小柚"：数据在平台数据目录（Windows `%LOCALAPPDATA%\Koi`，macOS `~/Library/Application Support/Koi`），工作区在"文档/KoiWorkspace"。
 
 网页侧栏的内容：
 
 - 她的状态、心情、精力、好感和内心想法；
+- "她的一天"：24 小时睡/醒轨道、下一次闹钟和最近一次醒来的时间；
+- "她记得的"：日记与笔记本只读展示；默认只看数量，把 `mind.share_memory` 设为 `true` 后才展示正文；
 - "等你处理"：插件请你扫码、填写的内容；
 - "等你批准"：待处理的审批；
-- "操作记录"：她用过的工具。
+- "操作记录"：她用过的工具；
+- 对话记录：最近 200 条保存在 `data/web/history.jsonl`，重启或重新打开页面后还能看到；
+- 长对话：聊天顶部可加载更早的 60 条；状态变化由 SSE 推送，断开时自动退回轮询。
 
 ## 创建更多人格体
 
@@ -79,7 +83,7 @@ koi list                                # 本机所有人格体，以及是否�
 
 | 选项 | 作用 |
 |---|---|
-| `--template NAME` | 用内置模板，默认 `xiaoli`（小鲤） |
+| `--template NAME` | 用内置模板，默认 `xiaoli`（林小柚） |
 | `--from PATH` | 用自己的人设：`profile.md` 文件，或包含 `profile.md`（以及可选的 `params.yaml`）的目录 |
 | `--name NAME` | 给她起名，覆盖人设里的名字 |
 | `--port N` | Web 端口，默认自动挑一个空闲的（8765 留给默认实例） |
@@ -107,6 +111,7 @@ koi list                                # 本机所有人格体，以及是否�
       profile.md    人设
       params.yaml   性格参数
     memory/         经历记录、日记、笔记本
+    web/history.jsonl  最近 200 条网页对话（本机，重启后仍在）
     plugins/        插件配置
     logs/koi.log
   workspace/        她的工作区
@@ -120,8 +125,8 @@ koi list                                # 本机所有人格体，以及是否�
 
 ```markdown
 ---
-name: 小鲤
-owner_call: 主人
+name: 林小柚
+owner_call: 哥哥
 ---
 ## 性格
 - 清纯、温柔、甜……
@@ -142,6 +147,7 @@ will:
   strong_insist_limit: 2      # 强烈要求几次后必须照做（1–3）
 mind:
   show_thoughts: true         # 网页上是否显示内心独白
+  share_memory: false         # 网页是否只读展示最近 10 篇日记和笔记本正文
 ```
 
 完整参数列表见 `src/koi/persona/params.py`。修改后重启生效。
@@ -208,6 +214,7 @@ src/koi/
 sim/                离散事件模拟
 tests/
 docs/design.md      设计文档
+docs/design/        Web 界面改版提案（HTML + 可交互原型）
 ```
 
 ### 编写插件

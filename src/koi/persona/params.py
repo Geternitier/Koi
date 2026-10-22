@@ -115,6 +115,8 @@ class MindParams(_Params):
     act_temperature: float = 1.0
     journal_entries: int = 80
     show_thoughts: bool = True
+    # 是否把日记与笔记本正文交给主人界面（只读）。默认关闭，只暴露数量
+    share_memory: bool = False
     proactive_min_interval_h: float = 2.0
     consolidate_temperature: float = 0.7
     # 答应主人的事之后这么久内可以用工具（审批结果也会延长）

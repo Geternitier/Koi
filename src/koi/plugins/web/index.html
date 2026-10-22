@@ -2,282 +2,289 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F7F3E9">
 <title>Koi</title>
-<style>
-  :root { --bg: #f6f5f2; --panel: #fff; --line: #e4e1da; --text: #2b2b2b; --muted: #8a867d;
-          --owner: #3b6fd8; --koi: #fff; --accent: #e67e22; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.6 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
-         background: var(--bg); color: var(--text); height: 100vh; display: flex; }
-  #chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #log { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
-  .msg { max-width: 70%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
-  .msg time { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .owner { align-self: flex-end; background: var(--owner); color: #fff; }
-  .owner time { color: #dfe7fb; }
-  .koi { align-self: flex-start; background: var(--koi); border: 1px solid var(--line); }
-  .system { align-self: center; color: var(--muted); font-size: 13px; }
-  form { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--panel); }
-  textarea { flex: 1; resize: none; height: 44px; padding: 10px; border: 1px solid var(--line);
-             border-radius: 8px; font: inherit; }
-  button { padding: 0 18px; border: 0; border-radius: 8px; background: var(--owner); color: #fff; font: inherit; cursor: pointer; }
-  aside { width: 260px; border-left: 1px solid var(--line); background: var(--panel); padding: 20px; overflow-y: auto; }
-  aside h2 { margin: 0 0 4px; font-size: 20px; }
-  .status { color: var(--muted); margin-bottom: 16px; }
-  .row { margin: 10px 0; }
-  .label { font-size: 12px; color: var(--muted); }
-  .bar { height: 8px; background: #eee; border-radius: 4px; overflow: hidden; margin-top: 4px; }
-  .bar > div { height: 100%; background: var(--accent); transition: width .5s; }
-  .thought { font-size: 13px; color: #555; background: #faf8f3; border-left: 3px solid var(--line);
-             padding: 6px 10px; white-space: pre-wrap; }
-  .meta { font-size: 12px; color: var(--muted); margin-top: 20px; }
-  .approval { border: 1px solid var(--accent); border-radius: 8px; padding: 8px; margin-top: 6px;
-              font-size: 13px; word-break: break-all; }
-  .approval .actions { display: flex; gap: 6px; margin-top: 6px; }
-  .approval button { padding: 4px 12px; font-size: 13px; }
-  .approval button.deny { background: #999; }
-  .interaction { border: 1px solid var(--owner); border-radius: 8px; padding: 8px; margin-top: 6px; font-size: 13px; }
-  .interaction .from { font-size: 11px; color: var(--muted); }
-  .interaction .title { font-weight: 600; }
-  .interaction .message { color: #555; white-space: pre-wrap; }
-  .interaction img { display: block; width: 100%; max-width: 200px; margin: 6px auto; background: #fff; padding: 4px; }
-  .interaction input { width: 100%; margin: 4px 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
-  .interaction .actions { display: flex; gap: 6px; margin-top: 6px; }
-  .interaction button { padding: 4px 12px; font-size: 13px; }
-  .interaction button.deny { background: #999; }
-  .interaction .expires { font-size: 11px; color: var(--muted); }
-  details summary { cursor: pointer; }
-  .audit { font-size: 12px; color: #555; margin-top: 4px; word-break: break-all; }
-  .audit .fail { color: #c0392b; }
-  @media (max-width: 720px) { aside { display: none; } .msg { max-width: 85%; } }
-</style>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%232E6B64'/%3E%3Cpath d='M18 36c6-8 18-10 26-5 4 3 6 6 7 10-9 2-19 1-26-2-3-1-5-2-7-3Z' fill='%23F7F3E9'/%3E%3Ccircle cx='42' cy='35' r='1.6' fill='%232E6B64'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
 </head>
 <body>
-<section id="chat">
-  <div id="log"></div>
-  <form id="form">
-    <textarea id="input" placeholder="说点什么……（Enter 发送，Shift+Enter 换行）"></textarea>
-    <button>发送</button>
-  </form>
-</section>
-<aside>
-  <h2 id="name">Koi</h2>
-  <div class="status" id="status">连接中…</div>
-  <div class="row"><span class="label">心情</span><div id="mood">-</div></div>
-  <div class="row"><span class="label">精力 <span id="energy-num"></span></span>
-    <div class="bar"><div id="energy" style="width:0"></div></div></div>
-  <div class="row"><span class="label">对你的感觉</span><div id="affinity">-</div></div>
-  <div class="row" id="thought-row" hidden><span class="label">在想</span><div class="thought" id="thought"></div></div>
-  <div class="row" id="interactions-row" hidden><span class="label">等你处理</span><div id="interactions"></div></div>
-  <div class="row" id="approvals-row" hidden><span class="label">等你批准</span><div id="approvals"></div></div>
-  <details class="row" id="audit-box"><summary class="label">操作记录</summary><div id="audit"></div></details>
-  <div class="meta" id="meta"></div>
-</aside>
-<script>
-const STATUS = { sleeping: "睡着了", dozing: "发呆中", active: "正在想…" };
-const log = document.getElementById("log");
-const input = document.getElementById("input");
+<a class="k-skip" href="#log">跳到对话</a>
 
-function fmt(iso) {
-  const d = new Date(iso);
-  return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-}
+<div class="koi-app" id="koiApp" data-view="chat" data-theme="day">
+  <svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="pondGrad" cx="32%" cy="24%" r="88%">
+        <stop offset="0" stop-color="#F7F0DE"/>
+        <stop offset=".42" stop-color="#CFE4D9"/>
+        <stop offset=".76" stop-color="#5E9A8C"/>
+        <stop offset="1" stop-color="#235950"/>
+      </radialGradient>
+    </defs>
+    <symbol id="medallion-base" viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r="49" fill="url(#pondGrad)"/>
+      <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,.17)" stroke-width="1"/>
+      <circle cx="50" cy="50" r="30" fill="none" stroke="rgba(255,255,255,.11)" stroke-width="1"/>
+      <g opacity=".42" fill="#FFF6E6">
+        <path d="M17 65c5-7 15-9 22-5 3 2 6 5 7 9-7 2-16 1-22-1-3-1-5-2-7-3Z"/>
+        <path d="m17 65-6-4 1 7-1 5 6-4Z"/>
+        <circle cx="41" cy="64" r="1.1" fill="#235950"/>
+      </g>
+      <g opacity=".34" fill="#F0A184" transform="rotate(180 64 35)">
+        <path d="M75 34c4-6 12-8 18-5 3 2 5 5 6 8-6 1-13 1-18-1-2-1-4-2-6-2Z"/>
+        <path d="m75 34-5-4 1 6-1 5 5-4Z"/>
+      </g>
+      <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,.34)" stroke-width="1.2"/>
+    </symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8 11h.01"/><path d="M12 11h.01"/><path d="M16 11h.01"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12.5h3.8l2.4-7 4.2 14 2.5-7H21"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 1 4 18.5Z"/><path d="M8 7h7"/><path d="M8 11h5"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><circle cx="4" cy="6" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="4" cy="18" r="1.2"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.8 13.2A8.8 8.8 0 1 1 10.8 3.2a7 7 0 0 0 10 10Z"/><path d="M17.5 3.6v3.2"/><path d="M15.9 5.2h3.2"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.2"/><path d="M12 19.8V22"/><path d="m4.9 4.9 1.6 1.6"/><path d="m17.5 17.5 1.6 1.6"/><path d="M2 12h2.2"/><path d="M19.8 12H22"/><path d="m4.9 19.1 1.6-1.6"/><path d="m17.5 6.5 1.6-1.6"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8.5a6 6 0 0 0-12 0c0 6.5-2.5 8.5-2.5 8.5h17S18 15 18 8.5Z"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7.2"/><path d="m20.5 20.5-4.2-4.2"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m4 12 16-8-6 16-2.5-6.5L4 12Z"/><path d="M11.5 13.5 20 4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></symbol>
+    <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3h-3z"/><path d="M21 14v3"/><path d="M14 21h3"/><path d="M21 21h.01"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/><path d="m18.6 15 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5.2l3.2 2"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 16a5.5 5.5 0 0 1 7 0"/><path d="M12 19.5h.01"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4.2"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M4 12h15"/><path d="m13 6 6 6-6 6"/></symbol>
+    <symbol id="i-arrow-back" viewBox="0 0 24 24"><path d="M20 12H5"/><path d="m11 18-6-6 6-6"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="3"/><path d="M6 10h.01"/><path d="M10 10h.01"/><path d="M14 10h.01"/><path d="M18 10h.01"/><path d="M7 14h10"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></symbol>
+  </svg>
 
-function add(msg) {
-  const div = document.createElement("div");
-  div.className = "msg " + msg.role;
-  div.textContent = msg.text;
-  if (msg.role !== "system") {
-    const t = document.createElement("time");
-    t.textContent = fmt(msg.time);
-    div.appendChild(t);
-  }
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-}
+  <aside class="k-rail" aria-label="主导航">
+    <span class="medallion" data-medallion="36" aria-hidden="true"></span>
+    <button class="k-navbtn is-active" data-go="chat" aria-label="聊天" title="聊天">
+      <svg class="i"><use href="#i-chat"/></svg><span class="tip">聊天</span>
+    </button>
+    <button class="k-navbtn" data-go="status" aria-label="她的此刻" title="她的此刻">
+      <svg class="i"><use href="#i-pulse"/></svg><span class="tip">她的此刻</span>
+    </button>
+    <button class="k-navbtn" data-go="memory" aria-label="记忆" title="记忆">
+      <svg class="i"><use href="#i-book"/></svg><span class="tip">她记得的</span>
+    </button>
+    <button class="k-navbtn" data-go="records" aria-label="操作记录" title="操作记录">
+      <svg class="i"><use href="#i-list"/></svg><span class="tip">做过的</span>
+    </button>
+    <span class="k-rail-spacer"></span>
+    <div class="k-rail-foot">
+      <button class="k-iconbtn" id="railTheme" aria-label="切换昼 / 夜" title="切换昼 / 夜">
+        <svg class="i k-theme-moon"><use href="#i-moon"/></svg>
+        <svg class="i k-theme-sun"><use href="#i-sun"/></svg>
+      </button>
+      <button class="k-avatar-wrap" id="railAvatar" aria-label="打开她的此刻">
+        <span class="medallion" data-medallion="38"></span>
+        <i class="k-status-dot" id="railDot" data-status="dozing"></i>
+      </button>
+    </div>
+  </aside>
 
-async function send() {
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = "";
-  const r = await fetch("/api/messages", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
-  });
-  if (!r.ok) add({ role: "system", text: "发送失败：" + r.status });
-}
+  <div class="k-main">
+    <header class="k-top">
+      <div class="k-top-brand">
+        <span class="medallion" data-medallion="28" aria-hidden="true"></span>
+        <b>Koi</b><span class="slash">/</span><span id="brandName">她</span>
+      </div>
+      <div class="k-top-context">
+        <span class="crumb" id="crumb">客厅</span>
+        <h1 id="viewTitle">和她说说话</h1>
+        <span class="k-status-pill" id="statusPill" data-status="dozing"><i></i><span id="statusText">发呆中</span></span>
+      </div>
+      <div class="k-top-right">
+        <span class="k-conn" id="connBadge"><i></i><span id="connTextTop">本机 · 连接中</span></span>
+        <button class="k-omni" id="cmdBtn" aria-label="快捷操作">
+          <svg class="i" style="width:13px;height:13px"><use href="#i-search"/></svg>
+          <span>找点什么</span><kbd>Ctrl</kbd><kbd>K</kbd>
+        </button>
+        <button class="k-iconbtn" id="themeBtn" aria-label="切换昼 / 夜" title="切换昼 / 夜">
+          <svg class="i k-theme-moon"><use href="#i-moon"/></svg>
+          <svg class="i k-theme-sun"><use href="#i-sun"/></svg>
+        </button>
+        <button class="k-iconbtn" id="bellBtn" aria-label="通知" title="通知">
+          <svg class="i"><use href="#i-bell"/></svg>
+          <span class="badge" id="bellBadge" hidden>1</span>
+        </button>
+        <button class="k-avatar-wrap" id="topAvatar" aria-label="打开她的此刻" style="width:30px;height:30px">
+          <span class="medallion" data-medallion="30"></span>
+        </button>
+      </div>
+    </header>
 
-document.getElementById("form").addEventListener("submit", e => { e.preventDefault(); send(); });
-input.addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
-});
+    <div class="k-banner" id="connBanner" hidden>
+      <svg class="i"><use href="#i-wifi"/></svg>
+      <span id="connText">没连上她。正在重试…</span>
+      <span class="retry-in" id="retryIn"></span>
+      <button class="k-btn" id="retryBtn">立即重试</button>
+    </div>
 
-function affinityText(a) {
-  if (a >= 0.7) return "很亲近";
-  if (a >= 0.4) return "挺好的";
-  if (a >= 0.1) return "有点冷淡";
-  return "有情绪";
-}
+    <div class="k-mobile-status">
+      <span class="dot" id="msDot" data-status="dozing"></span>
+      <b id="msStatus">发呆中</b>
+      <span>· 精力 <span id="msEnergy">—</span></span>
+      <span class="spacer"></span>
+      <button class="open-side" id="msPending" hidden></button>
+      <button class="open-side" id="openSideBtn">她的此刻 <svg class="i" style="width:10px;height:10px"><use href="#i-arrow-right"/></svg></button>
+    </div>
 
-async function refresh() {
-  try {
-    const s = await (await fetch("/api/state")).json();
-    const snap = s.snapshot;
-    document.getElementById("name").textContent = s.name;
-    document.title = s.name;
-    document.getElementById("status").textContent = STATUS[snap.status] || snap.status;
-    document.getElementById("mood").textContent =
-      `${snap.mood_label}（效价 ${snap.emotion_v.toFixed(2)}，唤醒 ${snap.emotion_a.toFixed(2)}）`;
-    document.getElementById("energy").style.width = snap.energy + "%";
-    document.getElementById("energy-num").textContent = Math.round(snap.energy) + "/100";
-    document.getElementById("affinity").textContent = affinityText(snap.owner_affinity);
-    const row = document.getElementById("thought-row");
-    row.hidden = !s.thought;
-    document.getElementById("thought").textContent = s.thought || "";
-    const llm = s.llm || {};
-    const hit = llm.cache_hit_rate == null ? "-" : Math.round(llm.cache_hit_rate * 100) + "%";
-    document.getElementById("meta").textContent =
-      `LLM 调用 ${llm.calls ?? 0} 次 · 缓存命中 ${hit}`;
-  } catch (e) {
-    document.getElementById("status").textContent = "连接断开";
-  }
-}
+    <div class="k-stage">
+      <section class="k-view k-view-chat" aria-label="对话">
+        <div class="k-chat">
+          <div class="k-log" id="log" role="log" aria-live="off" aria-relevant="additions text" tabindex="-1"></div>
+          <div class="k-sr-only" id="liveMessage" aria-live="polite"></div>
+          <button class="k-jump" id="jumpLatest" hidden>
+            <svg class="i"><use href="#i-chevron"/></svg> 回到最新
+          </button>
+          <div class="k-composer-wrap">
+            <div class="k-nudge" id="nudge" hidden>
+              <svg class="i"><use href="#i-moon"/></svg>
+              <span><b>她睡着了。</b> 现在发消息会叫醒她，可能带一点起床气。</span>
+              <button class="link" id="wakeBtn">叫她一声</button>
+            </div>
+            <div class="k-pinbar" id="pinbar" hidden>
+              <svg class="i" style="width:12px;height:12px"><use href="#i-shield"/></svg>
+              <b id="pinbarText">1 件事等你点头</b>
+              <button class="k-btn primary" id="pinbarBtn">去处理</button>
+            </div>
+            <form class="k-composer" id="composerForm">
+              <textarea id="input" rows="1" maxlength="4000" placeholder="说点什么……" aria-label="给她发消息"></textarea>
+              <button class="k-send" id="sendBtn" type="submit" aria-label="发送" title="发送">
+                <svg class="i"><use href="#i-send"/></svg>
+              </button>
+            </form>
+            <div class="k-composer-foot">
+              <span class="hints"><kbd>Enter</kbd> 发送 <span>·</span> <kbd>Shift</kbd><kbd>Enter</kbd> 换行 <span>·</span> <kbd>Esc</kbd> 收起</span>
+              <span class="k-count" id="count">0 / 4000</span>
+            </div>
+          </div>
+        </div>
+      </section>
 
-function el(tag, text, cls) {
-  const e = document.createElement(tag);
-  if (text != null) e.textContent = text;
-  if (cls) e.className = cls;
-  return e;
-}
+      <aside class="k-side" id="side" aria-label="她的此刻">
+        <button class="k-side-close" id="sideClose" aria-label="关闭">
+          <svg class="i"><use href="#i-x"/></svg>
+        </button>
+        <div class="k-ident">
+          <span class="medallion" data-medallion="55" aria-hidden="true"></span>
+          <div class="k-ident-copy">
+            <b id="sideName">她</b>
+            <div class="line" id="sideStatus" data-status="dozing"><i></i><span>正在连接…</span></div>
+          </div>
+          <div class="k-ident-side" id="sideConn">本机<br>只属于你</div>
+        </div>
 
-async function decide(id, approved) {
-  const r = await fetch(`/api/approvals/${id}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved }),
-  });
-  if (!r.ok) add({ role: "system", text: "处理失败：" + (await r.text()) });
-  refreshApprovals();
-}
+        <div id="kAttention"></div>
 
-async function refreshApprovals() {
-  try {
-    const list = await (await fetch("/api/approvals")).json();
-    document.getElementById("approvals-row").hidden = list.length === 0;
-    document.getElementById("approvals").replaceChildren(...list.map(a => {
-      const box = el("div", null, "approval");
-      box.appendChild(el("div", `${a.action}：${a.detail}`));
-      const actions = el("div", null, "actions");
-      const ok = el("button", "批准"), no = el("button", "拒绝", "deny");
-      ok.onclick = () => decide(a.id, true);
-      no.onclick = () => decide(a.id, false);
-      actions.append(ok, no);
-      box.appendChild(actions);
-      return box;
-    }));
-  } catch (e) {}
-}
+        <div class="k-vitals">
+          <div class="k-vital-top">
+            <div class="k-ring">
+              <svg viewBox="0 0 62 62" aria-hidden="true">
+                <circle class="track" cx="31" cy="31" r="26" fill="none" stroke-width="4"/>
+                <circle class="value" id="energyRing" cx="31" cy="31" r="26" fill="none" stroke-width="4" stroke-dasharray="163.36" stroke-dashoffset="163.36"/>
+              </svg>
+              <span class="k-ring-copy"><b id="energyNum">—</b><small>精力</small></span>
+            </div>
+            <div class="k-vital-copy">
+              <b id="energyHead">正在读她的状态</b>
+              <small id="energySub">稍等一下。</small>
+              <svg class="k-spark" id="energySpark" viewBox="0 0 150 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+            </div>
+          </div>
+          <div class="k-vitals-grid">
+            <div class="k-vital-cell">
+              <div class="label"><span>心情</span><b id="moodValue">—</b></div>
+              <div class="k-meter"><i class="warm" id="moodBar" style="width:50%"></i></div>
+              <div style="margin-top:3px;font-size:8.5px;color:var(--k-ink3)" id="moodWord">—</div>
+            </div>
+            <div class="k-vital-cell">
+              <div class="label"><span>困意</span><b id="sleepValue">—</b></div>
+              <div class="k-meter" id="sleepMeter"><i class="cool" id="sleepBar" style="width:0%"></i></div>
+              <div style="margin-top:3px;font-size:8.5px;color:var(--k-ink3)" id="sleepWord">—</div>
+            </div>
+            <div class="k-vital-cell">
+              <div class="label"><span>对你的感觉</span><b id="affValue">—</b></div>
+              <div class="k-affinity" id="affinity" aria-hidden="true">
+                <i></i><i></i><i></i><i></i><i></i>
+              </div>
+            </div>
+            <div class="k-vital-cell">
+              <div class="label"><span>现在</span><b id="nowValue">—</b></div>
+              <div style="margin-top:4px;font-size:8.5px;color:var(--k-ink3)" id="nowWord">—</div>
+            </div>
+          </div>
+        </div>
 
-// 按 ID 增量更新，避免定时刷新把正在填的输入框清空
-const cards = new Map();
+        <div class="k-thought-card" id="thoughtCard" hidden>
+          <div class="label"><svg class="i"><use href="#i-sparkles"/></svg> 此刻在心里</div>
+          <p id="sideThought"></p>
+        </div>
 
-async function post(url, body) {
-  const r = await fetch(url, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
-  });
-  if (!r.ok) {
-    let detail = r.status;
-    try { detail = (await r.json()).detail; } catch (e) {}
-    add({ role: "system", text: "处理失败：" + detail });
-  }
-  refreshInteractions();
-}
+        <button class="k-side-jump" data-go="status">
+          <span class="k-side-jump-icon"><svg class="i"><use href="#i-pulse"/></svg></span>
+          <span class="k-side-jump-copy"><b>她的一天</b><small>精力、心情、困意与上次说话</small></span>
+          <svg class="i"><use href="#i-arrow-right"/></svg>
+        </button>
 
-function interactionCard(a) {
-  const box = el("div", null, "interaction");
-  box.appendChild(el("div", `来自 ${a.plugin} 插件`, "from"));
-  box.appendChild(el("div", a.title, "title"));
-  box.message = box.appendChild(el("div", a.message, "message"));
-  if (a.has_qr) {
-    const img = el("img");
-    img.src = `/api/interactions/${a.id}/qr.svg`;
-    img.alt = "二维码";
-    box.appendChild(img);
-  }
-  if (a.url && /^https?:\/\//i.test(a.url)) {
-    const link = el("a", "打开链接");
-    link.href = a.url; link.target = "_blank"; link.rel = "noopener noreferrer";
-    box.appendChild(link);
-  }
-  const inputs = {};
-  for (const f of a.fields) {
-    const input = el("input");
-    input.type = f.sensitive ? "password" : "text";
-    input.placeholder = f.placeholder || f.label;
-    input.autocomplete = "off";
-    if (f.pattern) input.pattern = f.pattern;
-    inputs[f.name] = input;
-    box.appendChild(input);
-  }
-  const actions = el("div", null, "actions");
-  if (a.kind === "form") {
-    const ok = el("button", "提交");
-    ok.onclick = () => {
-      const values = {};
-      for (const [k, v] of Object.entries(inputs)) values[k] = v.value;
-      post(`/api/interactions/${a.id}`, { values });
-    };
-    actions.appendChild(ok);
-  }
-  const cancel = el("button", "取消", "deny");
-  cancel.onclick = () => post(`/api/interactions/${a.id}/cancel`);
-  actions.appendChild(cancel);
-  box.appendChild(actions);
-  box.expires = box.appendChild(el("div", "", "expires"));
-  return box;
-}
+        <div class="k-side-bottom">
+          <div class="k-side-title"><span>运行</span><span id="sideRunLabel">本机</span></div>
+          <div class="k-side-foot" id="sideRun"></div>
+        </div>
 
-async function refreshInteractions() {
-  try {
-    const list = await (await fetch("/api/interactions")).json();
-    const container = document.getElementById("interactions");
-    const ids = new Set(list.map(a => a.id));
-    for (const [id, card] of cards) if (!ids.has(id)) { card.remove(); cards.delete(id); }
-    for (const a of list) {
-      let card = cards.get(a.id);
-      if (!card) { card = interactionCard(a); cards.set(a.id, card); container.appendChild(card); }
-      card.message.textContent = a.message;
-      const left = Math.max(0, Math.round((new Date(a.expires_at) - Date.now()) / 60000));
-      card.expires.textContent = left > 0 ? `${left} 分钟内有效` : "快过期了";
-    }
-    document.getElementById("interactions-row").hidden = list.length === 0;
-  } catch (e) {}
-}
+        <div class="k-side-foot" style="margin-top:2px">
+          <div class="k-runrow"><i></i> 仅限本机访问 <span class="spacer"></span><code>Koi Web</code></div>
+        </div>
+      </aside>
 
-async function refreshAudit() {
-  if (!document.getElementById("audit-box").open) return;
-  try {
-    const list = await (await fetch("/api/audit")).json();
-    document.getElementById("audit").replaceChildren(...list.map(r => {
-      const line = el("div", `${fmt(r.time)} ${r.plugin}.${r.capability} ${r.args}`, "audit");
-      if (!r.ok) line.classList.add("fail");
-      line.title = r.summary;
-      return line;
-    }));
-  } catch (e) {}
-}
+      <section class="k-view k-view-status" aria-label="她的此刻">
+        <div class="k-page" id="statusPage"></div>
+      </section>
+      <section class="k-view k-view-memory" aria-label="她记得的">
+        <div class="k-page" id="memoryPage"></div>
+      </section>
+      <section class="k-view k-view-records" aria-label="操作记录">
+        <div class="k-page" id="recordsPage"></div>
+      </section>
+    </div>
 
-document.getElementById("audit-box").addEventListener("toggle", refreshAudit);
+    <nav class="k-bottomnav" aria-label="移动端导航">
+      <button class="k-bnav is-active" data-go="chat" aria-label="聊天"><svg class="i"><use href="#i-chat"/></svg><span>聊天</span></button>
+      <button class="k-bnav" data-go="status" aria-label="此刻"><svg class="i"><use href="#i-pulse"/></svg><span>此刻</span></button>
+      <button class="k-bnav" data-go="memory" aria-label="记忆"><svg class="i"><use href="#i-book"/></svg><span>记忆</span></button>
+      <button class="k-bnav" data-go="records" aria-label="记录"><svg class="i"><use href="#i-list"/></svg><span>记录</span><i class="dot-badge" id="bnavDot" hidden></i></button>
+    </nav>
+  </div>
 
-(async () => {
-  for (const m of await (await fetch("/api/history")).json()) add(m);
-  new EventSource("/api/stream").onmessage = e => {
-    add(JSON.parse(e.data)); refreshApprovals(); refreshInteractions();
-  };
-  refresh();
-  refreshApprovals();
-  refreshInteractions();
-  setInterval(() => { refresh(); refreshApprovals(); refreshAudit(); }, 5000);
-  setInterval(refreshInteractions, 2000);
-})();
-</script>
+  <div class="k-side-backdrop" id="sideBackdrop" hidden></div>
+
+  <div class="k-toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <div class="k-boot" id="boot">
+    <div>
+      <span class="medallion" data-medallion="78" aria-hidden="true"></span>
+      <h1>Koi</h1>
+      <p id="bootText">正在连接她…</p>
+      <div class="boot-err" id="bootErr" hidden></div>
+      <button class="k-btn" id="bootRetry" hidden>再试一次</button>
+    </div>
+  </div>
+</div>
+
+<noscript>
+  <p style="padding:24px;font-family:sans-serif">Koi 的网页界面需要 JavaScript。</p>
+</noscript>
 </body>
 </html>

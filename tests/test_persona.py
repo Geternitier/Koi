@@ -17,10 +17,15 @@ from koi.persona import (
     WillDecision,
 )
 from koi.persona.core import STATE_KEY
-from koi.persona.params import AffectParams, SleepParams
+from koi.persona.params import AffectParams, MindParams, SleepParams
 
 TZ = timezone(timedelta(hours=8))
 T0 = datetime(2026, 10, 19, 8, tzinfo=TZ)
+
+
+def test_mind_defaults_keep_memory_private():
+    assert MindParams().share_memory is False
+
 
 # 去掉随机自醒与噪声，使测试确定
 PARAMS = PersonaParams(

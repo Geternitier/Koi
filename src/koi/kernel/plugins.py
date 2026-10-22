@@ -26,6 +26,7 @@ from koi.protocol import (
     Interaction,
     InteractionRequest,
     Manifest,
+    MemorySnapshot,
     Permission,
     Plugin,
 )
@@ -37,6 +38,7 @@ AUDIT_ARGS_CHARS = 2000
 AUDIT_SUMMARY_CHARS = 500
 
 StateProvider = Callable[[], dict[str, Any]]
+MemoryProvider = Callable[[], dict[str, Any]]
 
 
 class PluginError(RuntimeError):
@@ -70,6 +72,12 @@ class _Context:
 
     async def state(self) -> dict[str, Any]:
         return self._host._state_provider()
+
+    async def memory_view(self) -> MemorySnapshot:
+        self._require("owner_ui")
+        if self._host._memory_provider is None:
+            raise PluginError("记忆服务未启用")
+        return MemorySnapshot.model_validate(self._host._memory_provider())
 
     async def request_approval(self, request: ApprovalRequest) -> str:
         return self._host._approvals_or_raise().request(self.plugin_id, request).id
@@ -164,6 +172,7 @@ class PluginHost:
         self._redact: Callable[[str], str] = redactor or (lambda s: s)
         self._plugins: dict[str, Plugin] = {}
         self._state_provider: StateProvider = dict
+        self._memory_provider: MemoryProvider | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         if approvals is not None:
             approvals.bind(self._on_approval)
@@ -186,6 +195,9 @@ class PluginHost:
 
     def set_state_provider(self, provider: StateProvider) -> None:
         self._state_provider = provider
+
+    def set_memory_provider(self, provider: MemoryProvider) -> None:
+        self._memory_provider = provider
 
     @property
     def plugin_ids(self) -> list[str]:

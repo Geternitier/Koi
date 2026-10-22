@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +17,15 @@ from koi.kernel.secrets import Redactor
 from koi.kernel.store import Store
 from koi.persona.journal import Journal, JournalEntry
 from koi.plugins.web import WebPlugin
-from koi.protocol import Approval, ApprovalRequest, Capability, EventIn, Manifest
+from koi.protocol import (
+    Approval,
+    ApprovalRequest,
+    Capability,
+    EventIn,
+    Manifest,
+    MemorySnapshot,
+    SharedDiary,
+)
 from koi.protocol.rpc import METHOD_NOT_FOUND, RpcError, RpcPeer
 
 FIXTURE = Path(__file__).with_name("plugin_fixture.py")
@@ -39,6 +48,22 @@ class FakeCtx:
 
     async def interactions(self) -> list:
         return []
+
+    async def memory_view(self) -> MemorySnapshot:
+        return MemorySnapshot(
+            shared=True,
+            diaries=1,
+            pending_notes=1,
+            entries=[
+                SharedDiary(
+                    date="2026-10-21",
+                    summary="把想说的话先写下来",
+                    body="今天的日记正文。",
+                )
+            ],
+            notebook="哥哥喝奶茶要三分糖。",
+            notes=["周末去新开的店"],
+        )
 
 
 def client(
@@ -80,10 +105,95 @@ async def test_web_message_roundtrip():
         assert ctx.emitted[0].trust == "owner" and ctx.emitted[0].payload == {"text": "你好"}
         await plugin.call("send_message", {"text": "嗨"})
         history = (await c.get("/api/history")).json()
-        assert [(m["role"], m["text"]) for m in history] == [("owner", "你好"), ("koi", "嗨")]
+        assert [(m["role"], m["text"]) for m in history["messages"]] == [
+            ("owner", "你好"),
+            ("koi", "嗨"),
+        ]
+        assert all(m.get("id") for m in history["messages"])
         assert (await c.get("/api/state")).json() == {"name": "小鲤"}
         assert (await c.post("/api/messages", json={"text": ""})).status_code == 422
         assert "Koi" in (await c.get("/")).text
+
+
+async def test_web_history_paginates_with_stable_ids():
+    plugin = WebPlugin()
+    plugin._ctx = FakeCtx()
+    async with client(plugin) as c:
+        await c.post("/api/messages", json={"text": "一"})
+        await plugin.call("send_message", {"text": "二"})
+        await c.post("/api/messages", json={"text": "三"})
+
+        latest = (await c.get("/api/history?limit=2")).json()
+        assert [m["text"] for m in latest["messages"]] == ["二", "三"]
+        assert latest["has_more"] is True
+        assert latest["next_before"] == latest["messages"][0]["id"]
+
+        older = (await c.get("/api/history?limit=2&before=" + latest["next_before"])).json()
+        assert [m["text"] for m in older["messages"]] == ["一"]
+        assert older["has_more"] is False
+        assert older["next_before"] is None
+        assert (await c.get("/api/history?before=missing")).status_code == 404
+
+
+async def test_web_history_survives_restart(tmp_path):
+    path = tmp_path / "history.jsonl"
+    first = WebPlugin(history_path=path)
+    first._ctx = FakeCtx()
+    await first.call("send_message", {"text": "记得我"})
+    await first.call("send_message", {"text": "第二句"})
+
+    again = WebPlugin(history_path=path)
+    again._ctx = FakeCtx()
+    async with client(again) as c:
+        data = (await c.get("/api/history")).json()
+        assert [message["text"] for message in data["messages"]] == ["记得我", "第二句"]
+        assert all(message.get("id") for message in data["messages"])
+        assert data["has_more"] is False
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+async def test_web_state_loop_pushes_named_state_events():
+    plugin = WebPlugin()
+    plugin._ctx = FakeCtx()
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+    plugin._subscribers.add(queue)
+    task = asyncio.create_task(plugin._state_loop())
+    try:
+        event = await asyncio.wait_for(queue.get(), 2)
+        assert event["kind"] == "state"
+        assert event["data"] == {"name": "小鲤"}
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_web_serves_static_assets_and_security_headers():
+    plugin = WebPlugin()
+    plugin._ctx = FakeCtx()
+    async with client(plugin) as c:
+        page = await c.get("/")
+        assert page.status_code == 200
+        assert "Koi" in page.text
+        assert "/static/app.css" in page.text and "/static/app.js" in page.text
+        assert page.headers["cache-control"] == "no-store"
+        csp = page.headers["content-security-policy"]
+        assert csp.startswith("default-src 'self'") and "frame-ancestors 'none'" in csp
+        assert page.headers["x-content-type-options"] == "nosniff"
+        assert page.headers["x-frame-options"] == "DENY"
+
+        css = await c.get("/static/app.css")
+        assert css.status_code == 200 and "text/css" in css.headers["content-type"]
+        assert "koi-app" in css.text
+        js = await c.get("/static/app.js")
+        assert js.status_code == 200 and "javascript" in js.headers["content-type"]
+        assert "/api/state" in js.text
+        memory = await c.get("/api/memory")
+        assert memory.status_code == 200
+        assert memory.json()["entries"][0]["date"] == "2026-10-21"
+        assert memory.json()["notebook"].startswith("哥哥")
+        history = await c.get("/api/history")
+        assert history.headers["cache-control"] == "no-store"
 
 
 async def test_web_rejects_non_local_clients_and_foreign_hosts():
@@ -134,6 +244,30 @@ class _Echo:
             case "slow":
                 await asyncio.sleep(1)
         return {"ok": True, "echo": args}
+
+
+async def test_memory_view_requires_owner_ui_and_provider():
+    host = PluginHost(EventBus(), RealClock())
+    plugin = _Echo()
+    host.add(plugin)
+    ctx = _Context(host, plugin)
+    with pytest.raises(PermissionError, match="owner_ui"):
+        await ctx.memory_view()
+
+    plugin.manifest.permissions = ["owner_ui"]
+    with pytest.raises(PluginError, match="未启用"):
+        await ctx.memory_view()
+
+    host.set_memory_provider(
+        lambda: {
+            "shared": True,
+            "diaries": 1,
+            "pending_notes": 0,
+            "entries": [{"date": "2026-10-21", "body": "正文"}],
+        }
+    )
+    view = await ctx.memory_view()
+    assert view.shared and view.entries[0].date.isoformat() == "2026-10-21"
 
 
 async def test_host_downgrades_trust_and_tags_source():
