@@ -86,6 +86,30 @@ async def test_web_message_roundtrip():
         assert "Koi" in (await c.get("/")).text
 
 
+async def test_web_serves_static_assets_and_security_headers():
+    plugin = WebPlugin()
+    plugin._ctx = FakeCtx()
+    async with client(plugin) as c:
+        page = await c.get("/")
+        assert page.status_code == 200
+        assert "Koi" in page.text
+        assert "/static/app.css" in page.text and "/static/app.js" in page.text
+        assert page.headers["cache-control"] == "no-store"
+        csp = page.headers["content-security-policy"]
+        assert csp.startswith("default-src 'self'") and "frame-ancestors 'none'" in csp
+        assert page.headers["x-content-type-options"] == "nosniff"
+        assert page.headers["x-frame-options"] == "DENY"
+
+        css = await c.get("/static/app.css")
+        assert css.status_code == 200 and "text/css" in css.headers["content-type"]
+        assert "koi-app" in css.text
+        js = await c.get("/static/app.js")
+        assert js.status_code == 200 and "javascript" in js.headers["content-type"]
+        assert "/api/state" in js.text
+        history = await c.get("/api/history")
+        assert history.headers["cache-control"] == "no-store"
+
+
 async def test_web_rejects_non_local_clients_and_foreign_hosts():
     plugin = WebPlugin()
     plugin._ctx = FakeCtx()

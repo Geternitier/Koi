@@ -15,14 +15,39 @@ import qrcode
 import qrcode.image.svg
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from koi.protocol import Approval, Capability, EventIn, Interaction, Manifest, PluginContext
 
 PAGE = Path(__file__).with_name("index.html")
+STATIC_DIR = Path(__file__).with_name("static")
 LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 KEEPALIVE_S = 15.0
+CSP = (
+    "default-src 'self'; "
+    "img-src 'self' data:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "
+    "connect-src 'self'; "
+    "font-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+def _secure(response: Response) -> Response:
+    """不依赖浏览器默认值：这个页面可以批准本机工具。"""
+    response.headers.setdefault("Content-Security-Policy", CSP)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+    return response
 
 
 class MessageIn(BaseModel):
@@ -134,12 +159,23 @@ class WebPlugin:
             # 校验 Host 头防 DNS 重绑定：恶意网页把自己的域名解析到 127.0.0.1 时 Host 不匹配
             host = urlsplit(f"//{request.headers.get('host', '')}").hostname or ""
             if client not in LOCAL_HOSTS or host not in LOCAL_HOSTS:
-                return HTMLResponse("仅限本机访问", status_code=403)
-            return await call_next(request)
+                return _secure(HTMLResponse("仅限本机访问", status_code=403))
+            response = await call_next(request)
+            if request.url.path.startswith("/api/"):
+                response.headers.setdefault("Cache-Control", "no-store")
+            elif request.url.path.startswith("/static/"):
+                response.headers.setdefault("Cache-Control", "no-cache")
+            return _secure(response)
 
-        @app.get("/", response_class=HTMLResponse)
-        async def index() -> str:
-            return PAGE.read_text(encoding="utf-8")
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+        @app.get("/", response_class=FileResponse)
+        async def index() -> FileResponse:
+            return FileResponse(
+                PAGE,
+                media_type="text/html",
+                headers={"Cache-Control": "no-store"},
+            )
 
         @app.get("/api/history")
         async def history() -> list[dict[str, Any]]:
