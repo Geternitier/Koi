@@ -1,4 +1,4 @@
-"""生活时间的自动唤醒：交互热度 × 退避 × 精力 × 随机抖动。"""
+"""生活时间的自动唤醒：交互热度 × 退避 × 精力和心情 × 随机抖动。"""
 
 import random
 from datetime import timedelta
@@ -13,9 +13,14 @@ def decay_heat(heat: float, hours: float, p: WakeParams) -> float:
 
 
 def autonomous_interval(
-    heat: float, backoff: int, energy: float, p: WakeParams, rng: random.Random
+    heat: float,
+    backoff: int,
+    energy: float,
+    valence: float,
+    p: WakeParams,
+    rng: random.Random,
 ) -> timedelta:
-    g = 0.5 + max(0.0, min(100.0, energy)) / 100
+    g = 0.5 + max(0.0, min(100.0, energy)) / 100 + p.valence_gain * max(0.0, valence)
     minutes = (
         p.base_interval_min
         * 2**backoff

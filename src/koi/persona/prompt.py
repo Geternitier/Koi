@@ -27,7 +27,7 @@ REASON_TEXT = {
     WakeReason.NATURAL: "你刚睡醒。",
     WakeReason.SELF: "你睡着睡着自己醒了过来。",
     WakeReason.DISTURBED: "你被消息吵醒了。",
-    WakeReason.AUTONOMOUS: "你闲着，自己回过神来，没有新消息。",
+    WakeReason.AUTONOMOUS: "你闲着，自己回过神来，没有新消息。想做点什么就去做吧。",
     WakeReason.EVENT: "收到了新消息。",
 }
 
@@ -387,6 +387,18 @@ def act_prompt(
         answer_rule = f"不想说话时可以为空列表，但{owner}找你时通常应该回应。"
     if ctx.images:
         answer_rule += "画面和字幕已经附上，按它们讲里面实际发生了什么。"
+    if ctx.tools:
+        activity_scope = (
+            "可以在脑子里想（发呆、回想、构思），也可以用「你能用的工具」去做"
+            "（搜搜感兴趣的东西、在工作区里写点什么）。"
+        )
+        if ctx.reason == WakeReason.AUTONOMOUS:
+            activity_scope += (
+                "这会儿闲着，可以从角色设定里「闲下来的时候」挑件喜欢的事去做；"
+                f"自己闲着时别做需要{owner}批准的事；累了、没兴致就发呆。"
+            )
+    else:
+        activity_scope = "只能是脑子里能做的事：发呆、回想、构思、琢磨点子。"
     parts.append(f"""# 任务：思考与表达
 输出 json，格式：
 {{"thought": "内心独白", "replies": [{{"event": 1, "text": "要说的话"}}], "more": false, "activity": null, "engaged": false, "feeling": null, "alarm": null{tools_field}}}
@@ -394,10 +406,10 @@ def act_prompt(
 - thought：此刻的内心独白，第一人称，一两句。
 - replies：这一拍要发出去的话，按顺序写，一条是一条短消息。要说的信息多就拆开，这一拍只放现在说的那几句。event 填所回应的新事件序号（回应的是其中最后一条时，填那一条的序号）。event 为 null 表示主动找{owner}说话{proactive}。{answer_rule}
 - more：发完这一拍还想继续说时为 true，下一拍再补没说完的信息。说完了就是 false。答应陪{owner}聊天、说说话时，只回「好呀」等于还没做：心情合适就接着从你记得的经历、日记或笔记本里起一个具体话题，一次只推进一点，然后把话头留给{owner}。很累或心情低落时 more 必须为 false。不要编造记得的事，也不要连着抛好几个问题。
-- activity：如果是你自己回过神来、做了点什么，用一句话写下做了什么（只能是脑子里能做的事：发呆、回想、构思、琢磨点子），否则为 null。
+- activity：如果是你自己回过神来、做了点什么，用一句话写下做了什么，否则为 null。{activity_scope}
 - engaged：自己回过神来时，是否找到了想做的事。
 - feeling：做的事或说的话给你带来的感受，格式 {{"valence": "positive|neutral|negative", "arousal": "exciting|neutral|calming", "intensity": "slight|medium|strong"}}，没有就为 null。
-- alarm：需要定闹钟时（比如答应了到点提醒{owner}、自己想早起），格式 {{"at": "YYYY-MM-DDTHH:MM", "reason": "原因"}}，否则为 null。{tools_help}""")
+- alarm：需要定闹钟时（比如答应了到点提醒{owner}、自己想早起），格式 {{"at": "YYYY-MM-DDTHH:MM", "reason": "原因", "level": 1}}，否则为 null。level 取 1、2、3：1 是到点一定要响，睡着也叫醒你（早起、答应{owner}的要紧提醒）；2 是醒着时提醒，睡着就等醒来再说；3 是闲下来再说的小事。{tools_help}""")
     return "\n\n".join(parts)
 
 

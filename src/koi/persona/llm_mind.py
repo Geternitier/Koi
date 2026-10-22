@@ -5,11 +5,12 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any, Protocol, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from koi.kernel.llm import Usage
 from koi.persona.affect import Appraisal
 from koi.persona.mind import (
+    AlarmLevel,
     AlarmRequest,
     Consolidation,
     ConsolidationInput,
@@ -60,6 +61,16 @@ class NotebookOutput(BaseModel):
 class AlarmOutput(BaseModel):
     at: datetime
     reason: str = ""
+    level: AlarmLevel = 1
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def _coerce_level(cls, v: object) -> object:
+        """模型偶尔写成字符串或越界，按最接近的档位收。"""
+        try:
+            return min(3, max(1, int(v)))  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return 1
 
 
 class ActOutput(BaseModel):
@@ -156,7 +167,7 @@ class LLMMind:
             if at.tzinfo is None:
                 at = at.replace(tzinfo=ctx.snapshot.time.tzinfo)
             if at > ctx.snapshot.time:
-                alarms.append(AlarmRequest(at=at, reason=out.alarm.reason))
+                alarms.append(AlarmRequest(at=at, reason=out.alarm.reason, level=out.alarm.level))
         return WakeOutcome(
             energy_cost=self._cost(usage),
             appraisals=[out.feeling] if out.feeling else [],

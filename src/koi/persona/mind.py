@@ -57,9 +57,14 @@ class Reply(BaseModel):
     text: str
 
 
+AlarmLevel = Literal[1, 2, 3]
+
+
 class AlarmRequest(BaseModel):
     at: datetime
     reason: str
+    # 1：到点一定响，睡着也叫醒；2：醒着时提醒；3：闲下来再说
+    level: AlarmLevel = 1
 
 
 class ToolSpec(BaseModel):

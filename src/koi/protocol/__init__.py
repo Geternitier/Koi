@@ -11,7 +11,9 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
-PROTOCOL_VERSION = "koi/0.1"
+PROTOCOL_VERSION = "koi/0.2"
+# koi/0.1 只有 P0–P3，含义和现在不同；核心按旧含义换算（见 kernel.plugins）
+LEGACY_PROTOCOL = "koi/0.1"
 
 TrustLevel = Literal["owner", "known_person", "external"]
 # approve：查看与处理审批、查看审计记录。只授予主人使用的界面类插件
@@ -49,10 +51,14 @@ class Manifest(BaseModel):
 
 
 class EventIn(BaseModel):
-    """插件上报给核心的事件。来源由核心按插件 ID 填写，插件无法伪造。"""
+    """插件上报给核心的事件。来源由核心按插件 ID 填写，插件无法伪造。
+
+    优先级：0 主人的控制（只有主人界面类插件能用）；1 重要事件（限流）；
+    2 主人的普通消息；3 和别人的交互、通知；4 环境信息，不会打断她。
+    """
 
     type: str
-    priority: int = Field(ge=0, le=3)
+    priority: int = Field(ge=0, le=4)
     trust: TrustLevel = "external"
     payload: dict[str, Any] = Field(default_factory=dict)
     time: datetime | None = None
@@ -294,6 +300,7 @@ class Plugin(Protocol):
 
 
 __all__ = [
+    "LEGACY_PROTOCOL",
     "PROTOCOL_VERSION",
     "AppearanceView",
     "Approval",

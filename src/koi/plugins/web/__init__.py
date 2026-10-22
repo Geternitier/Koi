@@ -418,8 +418,23 @@ class WebPlugin:
                     self._system(f"已作为「{field.label}」提交给「{target.title}」，不会发给她")
                 return {"ok": True, "captured": True}
             self._publish({"role": "owner", "text": text, "time": now})
+            # 普通消息是 P2：睡着时留给她醒来再看；带急事字样的由核心升级
             await self.ctx.emit(
-                EventIn(type="owner_message", priority=0, trust="owner", payload={"text": text})
+                EventIn(type="owner_message", priority=2, trust="owner", payload={"text": text})
+            )
+            return {"ok": True}
+
+        @app.post("/api/wake", status_code=202)
+        async def wake_up() -> dict[str, bool]:
+            """主人点「叫她一声」：主人的控制事件，睡着也会叫醒她。"""
+            self._system("你叫了她一声")
+            await self.ctx.emit(
+                EventIn(
+                    type="wake_up",
+                    priority=0,
+                    trust="owner",
+                    payload={"text": "（主人叫了你一声，想让你醒醒）"},
+                )
             )
             return {"ok": True}
 

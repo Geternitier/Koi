@@ -48,15 +48,22 @@ async def test_bus_masks_and_drains_by_priority():
         got.append(e)
 
     bus.bind(on_interrupt)
-    bus.set_mask(Priority.P0)
+    assert bus.set_mask(Priority.P0) == []
     await bus.publish(ev(Priority.P0))
     await bus.publish(ev(Priority.P2, 1))
     await bus.publish(ev(Priority.P1, 2))
+    await bus.publish(ev(Priority.P3, 3))
     for m in range(3):
-        await bus.publish(ev(Priority.P3, 10 + m))
+        await bus.publish(ev(Priority.P4, 10 + m))
     assert [e.priority for e in got] == [Priority.P0]
     drained = bus.drain()
-    assert [e.priority for e in drained] == [Priority.P1, Priority.P2, Priority.P3, Priority.P3]
+    assert [e.priority for e in drained] == [
+        Priority.P1,
+        Priority.P2,
+        Priority.P3,
+        Priority.P4,
+        Priority.P4,
+    ]
     assert drained[-1].time == T0 + timedelta(minutes=12)
     assert bus.drain() == []
 

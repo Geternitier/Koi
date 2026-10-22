@@ -97,7 +97,7 @@ async def test_owner_wakes_at_night_and_queued_events_are_delivered():
     night = T0.replace(hour=3) + timedelta(days=1)
     reply = Event(
         type="bili_reply",
-        priority=Priority.P2,
+        priority=Priority.P3,
         source="t",
         trust=Trust.EXTERNAL,
         time=night - timedelta(hours=1),
