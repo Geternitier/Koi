@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from koi.kernel.plugins import PluginError
 from koi.protocol import (
+    LEGACY_PROTOCOL,
     PROTOCOL_VERSION,
     Approval,
     ApprovalRequest,
@@ -83,6 +84,8 @@ class ProcessPlugin:
             secrets=spec.secrets,
         )
         self.status: Status = "stopped"
+        # 插件握手时报的协议版本；旧版本的事件优先级由宿主换算
+        self.protocol_version = PROTOCOL_VERSION
         self.restarts = 0
         self.log = logging.getLogger(f"koi.plugin.{spec.id}")
         self._env = env
@@ -205,6 +208,7 @@ class ProcessPlugin:
             },
             timeout=self.init_timeout_s,
         )
+        self.protocol_version = str(result.get("protocol_version") or LEGACY_PROTOCOL)
         reported = Manifest.model_validate(result["manifest"])
         self.manifest = reported.model_copy(
             update={

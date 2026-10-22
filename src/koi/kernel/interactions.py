@@ -193,7 +193,7 @@ class InteractionService:
                 a.status = "expired"
                 a.updated_at = now
                 self._spawn(self._deliver(a, None))
-                self._publish(a, Priority.P2, f"「{a.title}」过期了", owner_action=False)
+                self._publish(a, Priority.P3, f"「{a.title}」过期了", owner_action=False)
             elif a.status not in OPEN and now - a.updated_at > timedelta(hours=1):
                 del self._items[a.id]
 

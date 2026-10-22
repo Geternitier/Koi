@@ -109,7 +109,7 @@ async def test_offer_media_keeps_bytes_out_of_the_event(tmp_path):
 
     event = bus.pending[0]
     assert event.type == "media"
-    assert event.priority == 2
+    assert event.priority == 3
     assert event.payload["text"] == "字幕：猫探出头"
     assert event.payload["frames"] == [{"path": "frames/0045.jpg", "t": 45.0}]
     assert event.payload["energy_cost"] == 4.5
@@ -191,7 +191,8 @@ async def test_act_sees_frames_and_spends_energy():
     sched.call_at(t, lambda: bus.publish(_owner(t, "在看什么")))
     await sched.run_until(t + timedelta(seconds=1))
 
-    assert persona.state.fatigue >= before + 4.5
+    sp = PARAMS.stamina
+    assert persona.state.fatigue >= before + 4.5 * sp.tool_scale * sp.factor_min
     act_messages = next(
         messages
         for schema, messages in llm.calls

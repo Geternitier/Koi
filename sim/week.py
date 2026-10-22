@@ -58,16 +58,18 @@ SCENARIOS = {
 def owner_events(sc: Scenario, days: int, rng: random.Random) -> list[Event]:
     events: list[Event] = []
 
-    def session(start: datetime, n: int, gap: tuple[float, float]) -> None:
+    def session(start: datetime, n: int, gap: tuple[float, float], urgent: bool = False) -> None:
         t = start
-        for _ in range(n):
+        for i in range(n):
+            text = "醒醒，有急事" if urgent and i == 0 else "在吗"
             events.append(
                 Event(
                     type="owner_message",
-                    priority=Priority.P0,
+                    priority=Priority.P2,
                     source="sim.web",
                     trust=Trust.OWNER,
                     time=t,
+                    payload={"text": text},
                 )
             )
             t += timedelta(minutes=rng.uniform(*gap))
@@ -86,11 +88,11 @@ def owner_events(sc: Scenario, days: int, rng: random.Random) -> list[Event]:
             session(day + timedelta(hours=23.6), rng.randint(35, 50), (2.0, 3.5))
         for cd, hour in sc.night_calls:
             if cd == d:
-                session(day + timedelta(days=1, hours=hour), 3, (1.0, 2.0))
-        # 他人私聊（P1）与回复通知（P2），全天随机
+                session(day + timedelta(days=1, hours=hour), 3, (1.0, 2.0), urgent=True)
+        # 他人私聊与回复通知（都是 P3），全天随机
         for prio, rate, typ, trust in (
-            (Priority.P1, 0.08, "friend_message", Trust.KNOWN),
-            (Priority.P2, 0.3, "bili_reply", Trust.EXTERNAL),
+            (Priority.P3, 0.08, "friend_message", Trust.KNOWN),
+            (Priority.P3, 0.3, "bili_reply", Trust.EXTERNAL),
         ):
             for _ in range(_poisson(rng, rate * 24)):
                 events.append(
@@ -136,7 +138,7 @@ class RuleMind:
         for i, e in enumerate(ctx.events, 1):
             r = self.rng.random()
             if e.type == "owner_message":
-                cost += 0.8
+                cost += 0.25
                 if r < 0.35:
                     intensity = self.rng.choice(["slight", "medium"])
                     appraisals.append(
@@ -147,7 +149,7 @@ class RuleMind:
                         EventAppraisal(event=i, valence="negative", intensity="medium")
                     )
             elif e.type != "alarm":
-                cost += 0.4
+                cost += 0.12
                 if r < 0.2:
                     appraisals.append(EventAppraisal(event=i, valence="positive"))
                 elif r > 0.9:
@@ -166,13 +168,14 @@ class RuleMind:
             p = min(0.9, max(0.05, 0.25 + s.energy / 200 + 0.3 * s.emotion_v))
             engaged = self.rng.random() < p
             if engaged:
-                cost += 3.0
-                if self.rng.random() < 0.5:
+                # 自己找事做（多用工具），做成了会高兴一点
+                cost += 1.0
+                if self.rng.random() < 0.6:
                     appraisals.append(
                         Appraisal(valence="positive", arousal="exciting", intensity="slight")
                     )
             else:
-                cost += 0.3
+                cost += 0.1
         self.thinks.append(ThinkRecord(s.time, ctx.reason, engaged, len(owner)))
         return WakeOutcome(energy_cost=cost, appraisals=appraisals, engaged=engaged)
 
@@ -235,7 +238,7 @@ def report(persona: Persona, mind: RuleMind, samples: list[Snapshot]) -> None:
     print("\n每日统计")
     print(
         f"  {'日期':<8}{'思考次数':>8}{'自主醒来':>8}{'有事做':>6}{'最低精力':>8}"
-        f"{'平均效价':>8}{'节律峰值':>8}"
+        f"{'平均效价':>8}{'消耗倍率':>8}{'回充余额':>8}{'节律峰值':>8}"
     )
     days = sorted({s.time.date() for s in samples})
     for d in days:
@@ -247,6 +250,8 @@ def report(persona: Persona, mind: RuleMind, samples: list[Snapshot]) -> None:
             f"  {d:%m-%d}  {len(th):>8}{len(auto):>8}{sum(t.engaged for t in auto):>6}"
             f"{min(s.energy for s in awake):>8.0f}"
             f"{statistics.fmean(s.emotion_v for s in awake):>8.2f}"
+            f"{statistics.fmean(s.energy_factor for s in awake):>8.2f}"
+            f"{statistics.fmean(s.recharge_credit for s in awake):>8.1f}"
             f"{day_samples[-1].circadian_peak_hour:>8.2f}"
         )
 
@@ -308,11 +313,11 @@ def plot(
 
     owner_t = [e.time for e in events if e.type == "owner_message"]
     ax_act.scatter(owner_t, [3] * len(owner_t), s=6, color="#c0392b", label="主人消息")
-    for prio, y, color, label in (
-        (Priority.P1, 2.5, "#2980b9", "他人私聊"),
-        (Priority.P2, 2.2, "#95a5a6", "B站回复"),
+    for typ, y, color, label in (
+        ("friend_message", 2.5, "#2980b9", "他人私聊"),
+        ("bili_reply", 2.2, "#95a5a6", "B站回复"),
     ):
-        ts = [e.time for e in events if e.priority == prio]
+        ts = [e.time for e in events if e.type == typ]
         ax_act.scatter(ts, [y] * len(ts), s=6, color=color, label=label)
     auto = [r for r in mind.thinks if r.reason == WakeReason.AUTONOMOUS]
     ax_act.scatter(

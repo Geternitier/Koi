@@ -300,7 +300,7 @@
     els.input.placeholder = !state.connected
       ? "还没连上她，正在重试…"
       : sleeping
-        ? "她睡着了，发消息会叫醒她…"
+        ? "她睡着了，消息会留给她醒来再看…"
         : "说点什么……";
   }
 
@@ -401,7 +401,9 @@
     els.energyNum.textContent = String(Math.round(energy));
     els.energyRing.style.strokeDashoffset = String(163.36 * (1 - energy / 100));
     els.energyHead.textContent = energyHeadline(snapshot);
-    els.energySub.textContent = "困意 " + pressure.toFixed(2) + "，睡眠阈值 " + upper.toFixed(2) + "。";
+    const factor = Number(snapshot.energy_factor);
+    const cost = Number.isFinite(factor) ? "，做事消耗 ×" + factor.toFixed(2) : "";
+    els.energySub.textContent = "困意 " + pressure.toFixed(2) + "，睡眠阈值 " + upper.toFixed(2) + cost + "。";
     els.energySpark.innerHTML = sparkline(state.samples.map((sample) => sample.energy));
 
     els.moodValue.textContent = signed(moodV);
@@ -1754,9 +1756,16 @@
     }
   });
 
-  els.wake.addEventListener("click", () => {
-    els.input.focus();
-    toast("发一句话就会叫醒她");
+  els.wake.addEventListener("click", async () => {
+    els.wake.disabled = true;
+    try {
+      await api("/api/wake", { method: "POST" });
+      toast("叫了她一声");
+    } catch (err) {
+      toast("没叫成：" + (err && err.message ? err.message : err), "error");
+    } finally {
+      els.wake.disabled = false;
+    }
   });
 
   els.jump.addEventListener("click", () => scrollBottom("smooth"));

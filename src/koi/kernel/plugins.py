@@ -28,6 +28,8 @@ from koi.kernel.media import (
 from koi.kernel.secrets import Redactor, SecretStore
 from koi.kernel.store import Store
 from koi.protocol import (
+    LEGACY_PROTOCOL,
+    PROTOCOL_VERSION,
     AppearanceView,
     Approval,
     ApprovalRequest,
@@ -49,6 +51,10 @@ log = logging.getLogger(__name__)
 _TRUST_RANK = {Trust.EXTERNAL: 0, Trust.KNOWN: 1, Trust.OWNER: 2}
 AUDIT_ARGS_CHARS = 2000
 AUDIT_SUMMARY_CHARS = 500
+# koi/0.1 的优先级换算：主人消息 → P2，私聊和回复 → P3，环境信息 → P4
+_LEGACY_PRIORITY = {0: Priority.P2, 1: Priority.P3, 2: Priority.P3, 3: Priority.P4}
+# 每个插件每小时最多发几条 P1，超出的降级，防止插件靠抬级插队
+P1_PER_HOUR = 3
 
 StateProvider = Callable[[], dict[str, Any]]
 MemoryProvider = Callable[[], dict[str, Any]]
@@ -84,7 +90,8 @@ class _Context:
             raise PermissionError(f"插件 {self.plugin_id} 没有 {permission} 权限")
 
     async def emit(self, event: EventIn) -> None:
-        self._host._emit(self._manifest, event)
+        version = getattr(self._plugin, "protocol_version", PROTOCOL_VERSION)
+        self._host._emit(self._manifest, event, protocol=version)
 
     async def state(self) -> dict[str, Any]:
         return self._host._state_provider()
@@ -212,6 +219,8 @@ class PluginHost:
         self._image_provider: ImageProvider | None = None
         self._work_dirs: dict[str, Path] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        # 插件 ID -> 最近发 P1 的时间
+        self._p1_times: dict[str, list[datetime]] = {}
         if approvals is not None:
             approvals.bind(self._on_approval)
         if interactions is not None:
@@ -281,7 +290,7 @@ class PluginHost:
             raise PluginError("精力消耗无效") from e
         event = Event(
             type="media",
-            priority=Priority.P2,
+            priority=Priority.P3,
             source=plugin_id,
             trust=Trust.EXTERNAL,
             time=self.clock.now(),
@@ -416,7 +425,9 @@ class PluginHost:
         if handler is not None:
             await handler(approval)
 
-    def _emit(self, manifest: Manifest, incoming: EventIn) -> None:
+    def _emit(
+        self, manifest: Manifest, incoming: EventIn, *, protocol: str = PROTOCOL_VERSION
+    ) -> None:
         trust = Trust(incoming.trust)
         ceiling = Trust(manifest.max_trust)
         if _TRUST_RANK[trust] > _TRUST_RANK[ceiling]:
@@ -424,17 +435,47 @@ class PluginHost:
                 "插件 %s 声明的信任级别 %s 超出上限，降级为 %s", manifest.id, trust, ceiling
             )
             trust = ceiling
+        now = self.clock.now()
         event = Event(
             type=incoming.type,
-            priority=Priority(incoming.priority),
+            priority=self._priority(manifest, incoming.priority, trust, protocol, now),
             source=manifest.id,
             trust=trust,
-            time=incoming.time or self.clock.now(),
+            time=incoming.time or now,
             payload=incoming.payload,
         )
         task = asyncio.create_task(self.bus.publish(event))
         self._tasks.add(task)
         task.add_done_callback(self._on_done)
+
+    def _priority(
+        self, manifest: Manifest, raw: int, trust: Trust, protocol: str, now: datetime
+    ) -> Priority:
+        """插件报的优先级按规则收紧。
+
+        - P0 只给主人界面类插件（有 owner_ui 权限）的主人事件；
+        - P2 是主人的级别，别人的事件最高到 P3；
+        - P1 每个插件每小时有限额，超出的按 P2 或 P3 处理。
+        """
+        p = _LEGACY_PRIORITY[min(raw, 3)] if protocol == LEGACY_PROTOCOL else Priority(raw)
+        owner = trust == Trust.OWNER
+        normal = Priority.P2 if owner else Priority.P3
+        if p == Priority.P0 and not (owner and "owner_ui" in manifest.permissions):
+            log.warning("插件 %s 不能发 P0 事件，按 %s 处理", manifest.id, normal.name)
+            p = normal
+        if p == Priority.P2 and not owner:
+            p = Priority.P3
+        if p == Priority.P1:
+            recent = [
+                t for t in self._p1_times.get(manifest.id, []) if (now - t).total_seconds() < 3600
+            ]
+            if len(recent) >= P1_PER_HOUR:
+                log.warning("插件 %s 一小时内的 P1 事件太多，按 %s 处理", manifest.id, normal.name)
+                p = normal
+            else:
+                recent.append(now)
+            self._p1_times[manifest.id] = recent
+        return p
 
     def _on_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)

@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -38,6 +39,8 @@ class Alarm(BaseModel):
     id: str
     at: datetime
     reason: str
+    # 闹钟事件的优先级：1 睡着也叫醒，2 醒着时提醒，3 闲下来再说
+    level: Literal[1, 2, 3] = 1
 
 
 class PersonaState(BaseModel):
@@ -46,6 +49,10 @@ class PersonaState(BaseModel):
     awake_since: datetime | None = None
     sleep_pressure: float
     fatigue: float = 0.0
+    # 被人善待时还能回多少精力（每小时补一点，有上限）
+    recharge_credit: float = 0.0
+    # 工具连续失败了几次，越多越沮丧
+    tool_fail_streak: int = 0
     affect: AffectState = Field(default_factory=AffectState)
     heat: float = 0.0
     last_interaction_at: datetime | None = None
@@ -94,3 +101,6 @@ class Snapshot(BaseModel):
     owner_bond: float
     last_owner_at: datetime | None
     pending_events: int
+    # 当前心情下做事的消耗倍率
+    energy_factor: float = 1.0
+    recharge_credit: float = 0.0

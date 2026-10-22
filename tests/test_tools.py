@@ -272,14 +272,16 @@ async def test_tool_rounds_and_calls_are_capped():
     assert len(w.tool_calls) == mp.max_tool_rounds * mp.max_tool_calls_per_round
     assert len(w.act_prompts) == mp.max_tool_rounds + 1
     assert any("太多轮" in e.text for e in w.persona.journal.recent(50))
-    assert w.persona.state.fatigue > before + len(w.tool_calls) * TOOLS[0].energy_cost * 0.9
+    sp = PARAMS.stamina
+    per_call = TOOLS[0].energy_cost * sp.tool_scale * sp.factor_min
+    assert w.persona.state.fatigue > before + len(w.tool_calls) * per_call * 0.9
 
 
 async def test_low_energy_stops_the_next_tool_round():
     act = scripted({"tools": [READ]}, {"tools": [READ]})
     w = World(act, asks_to_read)
     await w.persona.start()
-    _set_energy(w.persona, 26)
+    _set_energy(w.persona, PARAMS.mind.continue_min_energy + 0.2)
     await w.deliver(owner(T0 + timedelta(minutes=1), "读一下 a.txt"))
     assert len(w.tool_calls) == 1
     assert any("太累了，先不做了" in e.text for e in w.persona.journal.recent(20))

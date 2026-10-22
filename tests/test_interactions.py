@@ -308,7 +308,7 @@ async def test_interactions_expire():
     await settle()
     assert notified == [("expired", None)]
     assert rec.events[-1].payload["text"] == "「扫码」过期了"
-    assert rec.events[-1].priority == Priority.P2
+    assert rec.events[-1].priority == Priority.P3
     with pytest.raises(InteractionError, match="过期"):
         await svc.submit(a.id, {})
 

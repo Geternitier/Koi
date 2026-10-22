@@ -15,13 +15,14 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 from uuid import uuid4
 
-from koi.kernel.bus import Event, EventBus, Priority, Trust
+from koi.kernel.bus import Batch, Event, EventBus, Priority, Trust
 from koi.kernel.clock import Clock, SimClock, hours_between
 from koi.kernel.scheduler import Scheduler
 from koi.kernel.store import Store
 from koi.persona.affect import (
     INTENSITY,
     AffectState,
+    Appraisal,
     advance_affect,
     apply_appraisal,
     apply_impulse,
@@ -88,6 +89,9 @@ WAKE_TEXT = {
 
 # 这些档位下只说完这一拍，不再往下续
 _SPEECH_BLOCKED = frozenset({"bargain", "refuse", "reluctant", "stop"})
+_ACHIEVEMENT = Appraisal(
+    valence="positive", arousal="exciting", intensity="slight", type="做成了事"
+)
 
 DECISION_TEXT = {
     "eager": "答应了「{intent}」",
@@ -110,8 +114,11 @@ CORE_SOURCE_PREFIX = "core."
 # 插件在事件 payload 里填的路由信息，回复时原样带回 send_message（见 docs/plugin-spec.md）
 REPLY_ROUTE_KEYS = ("conversation", "message_id")
 
-AWAKE_MASK = Priority.P1
-SLEEP_MASK = Priority.P0
+# 屏蔽线：优先级数值不大于它的事件能打断她
+KERNEL_MASK = Priority.P0  # 记忆巩固：只有控制事件
+SLEEP_MASK = Priority.P1  # 睡着：再加重要事件
+FOCUS_MASK = Priority.P2  # 正在办主人的事：再加主人的普通消息
+AWAKE_MASK = Priority.P3  # 日常：再加别人的消息
 
 
 def is_owner_action(event: Event) -> bool:
@@ -182,6 +189,9 @@ class Persona:
         self.state = state or self._initial_state()
         self._lock = asyncio.Lock()
         self._inbox: list[Event] = []
+        # 日常状态下到达的 P3，攒一会儿再一起处理
+        self._held: list[Event] = []
+        self._last_p3_think: datetime | None = None
         self.last_thought: str | None = None
         self.last_decisions: list[WillDecision] = []
 
@@ -194,6 +204,7 @@ class Persona:
             updated_at=now,
             awake_since=now,
             sleep_pressure=lower + 0.05,
+            recharge_credit=self.params.stamina.recharge_max,
             circadian_peak_hour=peak,
             owner_affinity=self.params.will.affinity_baseline,
             affect=AffectState(
@@ -243,6 +254,8 @@ class Persona:
             owner_bond=self.owner_bond,
             last_owner_at=st.last_owner_at,
             pending_events=len(self.bus.pending),
+            energy_factor=self._mood_factor(),
+            recharge_credit=st.recharge_credit,
         )
 
     @property
@@ -262,9 +275,9 @@ class Persona:
     # ------------------------------------------------------------------ 启动
 
     async def start(self) -> None:
-        self.bus.bind(self._on_interrupt, self._on_queued)
+        self.bus.bind(self._on_interrupt, self._on_queued, self._classify)
         sleeping = self.state.status == Status.SLEEPING
-        self.bus.set_mask(SLEEP_MASK if sleeping else AWAKE_MASK)
+        self._set_mask(SLEEP_MASK if sleeping else AWAKE_MASK)
         async with self._lock:
             await self._process(self._advance(self.clock.now()))
         self.scheduler.call_later(TICK, self._tick, key="tick")
@@ -276,8 +289,8 @@ class Persona:
 
     # ------------------------------------------------------------------ 闹钟
 
-    def set_alarm(self, at: datetime, reason: str) -> str:
-        alarm = Alarm(id=uuid4().hex[:8], at=at, reason=reason)
+    def set_alarm(self, at: datetime, reason: str, level: Literal[1, 2, 3] = 1) -> str:
+        alarm = Alarm(id=uuid4().hex[:8], at=at, reason=reason, level=level)
         self.state.alarms[alarm.id] = alarm
         self._schedule_alarm(alarm)
         return alarm.id
@@ -295,11 +308,15 @@ class Persona:
             await self.bus.publish(
                 Event(
                     type="alarm",
-                    priority=Priority.P0,
+                    priority=Priority(alarm.level),
                     source="core.alarm",
                     trust=Trust.SYSTEM,
                     time=self.clock.now(),
-                    payload={"reason": alarm.reason, "scheduled_at": alarm.at.isoformat()},
+                    payload={
+                        "reason": alarm.reason,
+                        "scheduled_at": alarm.at.isoformat(),
+                        "level": alarm.level,
+                    },
                 )
             )
 
@@ -317,7 +334,14 @@ class Persona:
         async with self._lock:
             await self._process(self._advance(self.clock.now()))
             if self.state.status != Status.SLEEPING:
-                await self._think(WakeReason.AUTONOMOUS, self.bus.drain())
+                await self._think(WakeReason.AUTONOMOUS, self._take())
+
+    async def _followup(self) -> None:
+        """上一批没处理完、又够格打断她的事件，隔一会儿再处理一批。"""
+        async with self._lock:
+            await self._process(self._advance(self.clock.now()))
+            if self.state.status != Status.SLEEPING and self.bus.ready():
+                await self._think(WakeReason.EVENT, self._take())
 
     async def _daily(self) -> None:
         async with self._lock:
@@ -342,6 +366,9 @@ class Persona:
         return WakeReason.DISTURBED
 
     async def _on_interrupt(self, event: Event) -> None:
+        if event.priority >= Priority.P3:
+            self._hold(event)
+            return
         if self._lock.locked():
             self._inbox.append(event)
             return
@@ -353,7 +380,7 @@ class Persona:
                 self._end_sleep(now, reason)
             else:
                 reason = WakeReason.EVENT
-            await self._think(reason, [event, *self.bus.drain()])
+            await self._think(reason, self._take([event]))
 
     async def _flush_inbox(self) -> None:
         """处理在持锁期间（思考、记忆巩固）到达的中断。"""
@@ -361,16 +388,18 @@ class Persona:
             return
         events, self._inbox = self._inbox, []
         if self.state.status == Status.SLEEPING:
-            reason = self._wake_reason(events[0])
+            first = min(events, key=lambda e: e.priority)
+            reason = self._wake_reason(first)
             self._end_sleep(self.clock.now(), reason)
         else:
             reason = WakeReason.EVENT
-        await self._think(reason, [*events, *self.bus.drain()])
+        await self._think(reason, self._take(events))
 
     async def _on_queued(self, event: Event) -> None:
+        """睡着时，主人的普通消息有很小的概率把她吵醒（像手机响了一下）。"""
         if (
             self.state.status != Status.SLEEPING
-            or event.priority != Priority.P1
+            or event.priority != Priority.P2
             or self._lock.locked()
             or self.rng.random() >= self.params.sleep.disturb_wake_prob
         ):
@@ -380,7 +409,85 @@ class Persona:
             await self._process(self._advance(now))
             if self.state.status == Status.SLEEPING:
                 self._end_sleep(now, WakeReason.DISTURBED)
-                await self._think(WakeReason.DISTURBED, self.bus.drain())
+                await self._think(WakeReason.DISTURBED, self._take())
+
+    # ------------------------------------------------------------------ 中断分级
+
+    def _classify(self, event: Event) -> Event:
+        """主人或熟人的消息里有急事字样，就升为重要事件，睡着也会被叫醒。"""
+        if event.priority not in (Priority.P2, Priority.P3) or event.trust not in (
+            Trust.OWNER,
+            Trust.KNOWN,
+        ):
+            return event
+        text = event.payload.get("text")
+        if not isinstance(text, str) or not any(
+            w in text for w in self.params.interrupts.urgent_words
+        ):
+            return event
+        return event.model_copy(
+            update={"priority": Priority.P1, "payload": {**event.payload, "urgent": True}}
+        )
+
+    def _set_mask(self, level: Priority) -> None:
+        """切换屏蔽线。放宽时，队里已经够格的事件转进收件箱，持锁的一方处理完手头的事就看；
+        P3 照样先攒着。"""
+        for event in self.bus.set_mask(level):
+            if event.priority >= Priority.P3:
+                self._hold(event)
+            else:
+                self._inbox.append(event)
+
+    def _take(self, first: list[Event] | None = None) -> list[Event]:
+        """这次处理哪些事件：一定要处理的、收件箱里的、攒着的 P3，再从队里按顺序补满一批。"""
+        inbox, self._inbox = self._inbox, []
+        held = self._release_held()
+        ip = self.params.interrupts
+        batch = Batch(
+            max_events=ip.batch_events,
+            max_chars=ip.batch_chars,
+            aging_min=ip.aging_min,
+            promote_after_min=ip.promote_after_min,
+        )
+        must = [*(first or []), *inbox, *held]
+        return self.bus.take(self.clock.now(), batch, first=must)
+
+    def _hold(self, event: Event) -> None:
+        """日常状态下的 P3 先攒一会儿；两次由 P3 触发的思考之间至少隔几分钟。"""
+        self._held.append(event)
+        if self.scheduler.scheduled_at("p3batch") is not None:
+            return
+        ip = self.params.interrupts
+        now = self.clock.now()
+        at = now + timedelta(seconds=ip.p3_gather_s)
+        if self._last_p3_think is not None:
+            tired = self.energy < self.params.mind.continue_min_energy
+            gap = ip.p3_tired_gap_min if tired else ip.p3_min_gap_min
+            at = max(at, self._last_p3_think + timedelta(minutes=gap))
+        self.scheduler.call_at(at, self._fire_held, key="p3batch")
+
+    def _release_held(self) -> list[Event]:
+        held, self._held = self._held, []
+        if held:
+            self.scheduler.cancel("p3batch")
+        return held
+
+    async def _fire_held(self) -> None:
+        if not self._held:
+            return
+        if self._lock.locked():
+            self._inbox.extend(self._release_held())
+            return
+        async with self._lock:
+            now = self.clock.now()
+            await self._process(self._advance(now))
+            if not self._held:
+                return
+            if self.state.status == Status.SLEEPING:
+                self.bus.requeue(self._release_held())
+                return
+            self._last_p3_think = now
+            await self._think(WakeReason.EVENT, self._take())
 
     # ------------------------------------------------------------------ 生理推进
 
@@ -399,6 +506,8 @@ class Persona:
             st.fatigue = fatigue_after(st.fatigue, h, asleep=asleep, p=sp)
             st.affect = advance_affect(st.affect, h, mv, ma, ap, self.rng)
             st.heat = decay_heat(st.heat, h, wp)
+            stp = self.params.stamina
+            st.recharge_credit = min(stp.recharge_max, st.recharge_credit + stp.recharge_per_h * h)
             if not asleep:
                 day = logical_date(t, self.expected_mid_sleep_hour)
                 st.memory.day_moods.setdefault(day, DayMood()).add(
@@ -468,8 +577,10 @@ class Persona:
         st.status = Status.SLEEPING
         st.interrupted_sleep = False
         st.awake_since = None
-        self.bus.set_mask(SLEEP_MASK)
+        self._set_mask(SLEEP_MASK)
+        self.bus.requeue(self._release_held())
         self.scheduler.cancel("autowake")
+        self.scheduler.cancel("followup")
         self._journal(t, "sleep", "睡着了")
 
     def _end_sleep(self, t: datetime, reason: WakeReason) -> None:
@@ -489,7 +600,7 @@ class Persona:
             severity = clamp((s - lower) / (upper - lower), 0.0, 1.0) * inertia
             grump = sp.grumpiness * (0.5 if reason == WakeReason.ALARM else 1.0)
             st.affect = apply_impulse(st.affect, -0.5 * grump * severity, 0.3 * severity)
-        self.bus.set_mask(AWAKE_MASK)
+        self._set_mask(AWAKE_MASK)
         self._journal(t, "wake", WAKE_TEXT.get(reason, "醒了"))
 
     def _adapt_phase(self, now: datetime) -> None:
@@ -531,13 +642,16 @@ class Persona:
             await self._consolidate()
         if transitions and transitions[-1].kind == "wake":
             reason = self.state.episodes[-1].wake_reason or WakeReason.NATURAL
-            await self._think(reason, self.bus.drain())
+            await self._think(reason, self._take())
         await self._flush_inbox()
 
     async def _think(self, reason: WakeReason, events: list[Event]) -> None:
         st = self.state
         while True:
             st.status = Status.ACTIVE
+            # 在办主人的事时专注些：只有主人和更要紧的事能插进来
+            focus = any(e.trust == Trust.OWNER or is_owner_action(e) for e in events)
+            self._set_mask(FOCUS_MASK if focus else AWAKE_MASK)
             try:
                 await self._think_once(reason, events)
             except Exception as e:
@@ -545,9 +659,10 @@ class Persona:
                 self._journal(self.clock.now(), "error", f"思考出错：{type(e).__name__}")
                 await self._notify_error(events, e)
             st.status = Status.DOZING
+            self._set_mask(AWAKE_MASK)
             if not self._inbox:
                 break
-            events, self._inbox = [*self._inbox, *self.bus.drain()], []
+            events = self._take()
             reason = WakeReason.EVENT
 
         if self._exhausted(st.updated_at):
@@ -555,6 +670,9 @@ class Persona:
             await self._consolidate()
         else:
             self._schedule_autowake()
+            if self.bus.ready():
+                followup = timedelta(seconds=self.params.interrupts.followup_s)
+                self.scheduler.call_later(followup, self._followup, key="followup")
         self._save()
         await self._flush_inbox()
 
@@ -566,7 +684,7 @@ class Persona:
 
         self._apply_media_cost(events)
         perception = await self.mind.perceive(ctx) if events else Perception()
-        self.state.fatigue += max(0.0, perception.energy_cost)
+        self._spend(perception.energy_cost)
         self._apply_event_appraisals(events, event_people, perception.appraisals)
         decisions = self._decide(events, perception.requests)
         self._recall(perception.recall, ctx.memory)
@@ -587,7 +705,11 @@ class Persona:
         self.last_decisions = decisions
 
         mp = self.params.mind
+        autonomous = reason == WakeReason.AUTONOMOUS
+        engaged = outcome.engaged
+        max_rounds = mp.max_autonomous_tool_rounds if autonomous else mp.max_tool_rounds
         tool_rounds = 0
+        tool_successes = 0
         speech_rounds = 0
         while True:
             await self._dispatch(ctx, outcome)
@@ -595,14 +717,17 @@ class Persona:
             if outcome.tool_calls and ctx.tools:
                 if any(d.tier == "stop" for d in decisions):
                     self._journal(self.clock.now(), "activity", "停下了，不再用工具")
-                elif tool_rounds >= mp.max_tool_rounds:
+                elif tool_rounds >= max_rounds:
                     self._journal(self.clock.now(), "activity", "工具用了太多轮，先停下了")
                 elif tool_rounds > 0 and (block := self._tool_block_reason()):
                     self._journal(self.clock.now(), "activity", block)
+                elif tool_rounds > 0 and self._inbox:
+                    self._journal(self.clock.now(), "activity", "有新的事找来，先放下手里的活")
                 else:
                     tool_rounds += 1
                     calls = outcome.tool_calls[: mp.max_tool_calls_per_round]
                     results = [await self._run_tool(c, ctx.tools) for c in calls]
+                    tool_successes += sum(r.ok for r in results)
                     ctx = ctx.model_copy(
                         update={
                             "tool_results": [*ctx.tool_results, *results],
@@ -629,6 +754,9 @@ class Persona:
                         break
                     continue
             break
+        if autonomous and engaged and tool_successes:
+            # 自己找事做，而且真做成了点什么
+            self.state.affect = apply_appraisal(self.state.affect, _ACHIEVEMENT, self.params.affect)
 
     def _speech_allowed(self, reason: WakeReason, decisions: list[WillDecision]) -> bool:
         """续说只发生在聊天里，用来把信息拆开。自主苏醒、拒绝和坏心情都不续。"""
@@ -665,13 +793,17 @@ class Persona:
         if spec is None or self.actuator is None:
             return ToolResult(tool=call.tool, args=call.args, ok=False, result="没有这个工具")
         plugin, _, capability = call.tool.partition(".")
-        self.state.fatigue += max(0.0, spec.energy_cost)
+        self._spend(spec.energy_cost, declared=True)
+        waiting = False
         try:
             result = await self.actuator(plugin, capability, call.args)
             ok = bool(result.get("ok", True))
+            waiting = bool(result.get("needs_approval"))
             text = json.dumps(result, ensure_ascii=False, default=str)
         except Exception as e:
             ok, text = False, f"{type(e).__name__}: {e}"
+        if not waiting:
+            self._feel_tool_result(ok)
         limit = self.params.mind.tool_result_chars
         if len(text) > limit:
             text = text[:limit] + f"……（结果太长，截掉了，共 {len(text)} 字）"
@@ -689,7 +821,40 @@ class Persona:
                 cost = float(event.payload.get("energy_cost") or 0)
             except (TypeError, ValueError):
                 continue
-            self.state.fatigue += max(0.0, min(cost, MAX_MEDIA_ENERGY))
+            self._spend(min(cost, MAX_MEDIA_ENERGY), declared=True)
+
+    # ------------------------------------------------------------------ 精力账
+
+    def _mood_factor(self) -> float:
+        """心情好时做事不那么累，心情差时更累。"""
+        v, sp = self.state.affect.emotion_v, self.params.stamina
+        factor = 1 - sp.mood_relief * max(0.0, v) + sp.mood_strain * max(0.0, -v)
+        return clamp(factor, sp.factor_min, sp.factor_max)
+
+    def _spend(self, cost: float, *, declared: bool = False) -> None:
+        """记一笔活动疲劳。declared 表示插件声明的 energy_cost，要先折算。"""
+        if declared:
+            cost *= self.params.stamina.tool_scale
+        self.state.fatigue += max(0.0, cost) * self._mood_factor()
+
+    def _recharge(self, amount: float) -> None:
+        """被人善待时回一点精力，从回充额度里取。"""
+        st, sp = self.state, self.params.stamina
+        gain = min(st.recharge_credit, max(0.0, amount))
+        if gain <= 0:
+            return
+        st.recharge_credit -= gain
+        st.fatigue = max(sp.fatigue_floor, st.fatigue - gain)
+
+    def _feel_tool_result(self, ok: bool) -> None:
+        st, sp = self.state, self.params.stamina
+        if ok:
+            st.tool_fail_streak = 0
+            dv = sp.tool_success_v
+        else:
+            st.tool_fail_streak += 1
+            dv = sp.tool_failure_v * min(st.tool_fail_streak, sp.fail_streak_max)
+        st.affect = apply_impulse(st.affect, dv, 0.0)
 
     def _images_for(self, events: list[Event]) -> list[SeenImage]:
         if self.media_loader is None:
@@ -887,6 +1052,15 @@ class Persona:
             self._journal(self.clock.now(), "activity", f"想起了 {d:%Y-%m-%d} 那天的事")
 
     async def _consolidate(self) -> None:
+        """巩固期间只有控制事件能插进来；结束后按睡没睡着恢复屏蔽线，期间到的重要事件随即放出。"""
+        self._set_mask(KERNEL_MASK)
+        try:
+            await self._consolidate_memory()
+        finally:
+            sleeping = self.state.status == Status.SLEEPING
+            self._set_mask(SLEEP_MASK if sleeping else AWAKE_MASK)
+
+    async def _consolidate_memory(self) -> None:
         """入睡时的记忆巩固：按游标取出未巩固的经历，按天写日记、提炼笔记。
 
         LLM 失败不影响睡眠，游标停在失败的那天，下次入睡时重试。
@@ -985,7 +1159,7 @@ class Persona:
 
         陌生人带来的情绪冲击打折扣，越熟越接近原样。
         """
-        st, wp, pp = self.state, self.params.will, self.params.people
+        st, wp, pp, sp = self.state, self.params.will, self.params.people, self.params.stamina
         for a in appraisals:
             if not 1 <= a.event <= len(events):
                 continue
@@ -993,6 +1167,13 @@ class Persona:
             rel = st.people.get(pid) if pid is not None and pid != OWNER_ID else None
             scale = impact_scale(rel, pp) if rel is not None else 1.0
             st.affect = apply_appraisal(st.affect, a, self.params.affect, scale)
+            # 只有认得出是谁的人才会让她回点精力或更累；弹幕、动态流不算
+            if pid is not None:
+                weight = INTENSITY[a.intensity] * scale
+                if a.valence == "positive":
+                    self._recharge(sp.recharge_gain * weight)
+                elif a.valence == "negative":
+                    self._spend(sp.drain_gain * weight)
             toward = a.toward_sender
             if toward == "neutral":
                 continue
@@ -1113,11 +1294,11 @@ class Persona:
 
     def _apply_effects(self, outcome: WakeOutcome) -> None:
         st = self.state
-        st.fatigue += max(0.0, outcome.energy_cost)
+        self._spend(outcome.energy_cost)
         for appraisal in outcome.appraisals:
             st.affect = apply_appraisal(st.affect, appraisal, self.params.affect)
         for req in outcome.alarms:
-            self.set_alarm(req.at, req.reason)
+            self.set_alarm(req.at, req.reason, req.level)
 
     def _apply_outcome(self, reason: WakeReason, events: list[Event], outcome: WakeOutcome) -> None:
         st, wp = self.state, self.params.wake
@@ -1128,7 +1309,8 @@ class Persona:
             st.owner_channel = owner_events[-1].source
         heat = 0.0
         for e in events:
-            if e.priority > Priority.P1:
+            # 环境信息不算交互；合并多人的群消息没有具体的人，也不算
+            if e.priority == Priority.P4 or e.payload.get("conversation_type") == "group":
                 continue
             if e.trust == Trust.OWNER:
                 heat += wp.heat_owner
@@ -1145,7 +1327,9 @@ class Persona:
 
     def _schedule_autowake(self) -> None:
         st = self.state
-        delay = autonomous_interval(st.heat, st.backoff, self.energy, self.params.wake, self.rng)
+        delay = autonomous_interval(
+            st.heat, st.backoff, self.energy, st.affect.emotion_v, self.params.wake, self.rng
+        )
         self.scheduler.call_later(delay, self._autowake, key="autowake")
 
     def _schedule_daily(self) -> None:

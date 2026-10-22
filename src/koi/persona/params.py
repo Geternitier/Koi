@@ -27,7 +27,7 @@ class SleepParams(_Params):
     self_wake_rate_per_h: float = 0.015
     near_wake_rate_per_h: float = 0.6
     near_wake_scale: float = 0.03
-    # P1 事件在睡眠中吵醒的概率
+    # 睡着时排队的 P2 事件（主人的普通消息）把她吵醒的概率
     disturb_wake_prob: float = 0.05
     # 提前醒来后，睡眠压力仍高于下阈值这么多就能睡回笼觉
     resume_margin: float = 0.05
@@ -58,9 +58,11 @@ class AffectParams(_Params):
 
 
 class WakeParams(_Params):
-    base_interval_min: float = 90.0
+    base_interval_min: float = 60.0
     min_interval_min: float = 5.0
     max_interval_min: float = 240.0
+    # 心情好时醒得更勤：g = 0.5 + E/100 + valence_gain * max(0, v)
+    valence_gain: float = 0.3
     heat_alpha: float = 2.0
     heat_half_life_min: float = 20.0
     heat_owner: float = 1.0
@@ -123,6 +125,8 @@ class MindParams(_Params):
     owner_task_window_min: float = 30.0
     # 一轮思考里工具循环的天花板。平时由精力和心情提前停，不是日常配额。
     max_tool_rounds: int = 24
+    # 自己闲着找事做时，一次最多用几轮工具
+    max_autonomous_tool_rounds: int = 6
     max_tool_calls_per_round: int = 8
     tool_result_chars: int = 6000
     # 第一拍之后最多再开口几次，用来把一段信息拆成多条消息
@@ -130,10 +134,10 @@ class MindParams(_Params):
     # 精力或效价低于此值就不再续说（累了、心情低落时只说完这一拍）
     continue_min_energy: float = 25.0
     continue_min_valence: float = -0.2
-    # LLM 调用折算为活动疲劳
-    energy_per_call: float = 0.4
-    energy_per_1k_output: float = 1.0
-    energy_per_1k_uncached_prompt: float = 0.2
+    # LLM 调用折算为活动疲劳（报价；实际扣多少还要乘心情倍率，见 StaminaParams）
+    energy_per_call: float = 0.12
+    energy_per_1k_output: float = 0.35
+    energy_per_1k_uncached_prompt: float = 0.06
 
 
 class MemoryParams(_Params):
@@ -189,6 +193,55 @@ class PeopleParams(_Params):
     max_people: int = 300
 
 
+class StaminaParams(_Params):
+    # 插件声明的 energy_cost（工具和画面）折算成疲劳的比例
+    tool_scale: float = 0.35
+    # 心情倍率 = 1 - relief * max(0, v) + strain * max(0, -v)，夹在 [factor_min, factor_max]
+    mood_relief: float = 0.6
+    mood_strain: float = 0.8
+    factor_min: float = 0.7
+    factor_max: float = 1.4
+    # 别人带来的好事回充、坏事额外消耗：乘以强度（0.1 / 0.25 / 0.5）
+    recharge_gain: float = 3.0
+    drain_gain: float = 2.4
+    # 回充额度：每小时补这么多，最多攒这么多
+    recharge_per_h: float = 4.0
+    recharge_max: float = 6.0
+    # 疲劳最低到这里，相当于兴头上能比平时多出的精力
+    fatigue_floor: float = -10.0
+    # 工具成败的效价冲击；连续失败按次数放大，最多放大到 fail_streak_max 倍
+    tool_success_v: float = 0.04
+    tool_failure_v: float = -0.06
+    fail_streak_max: int = 3
+
+
+class InterruptParams(_Params):
+    # 主人或熟人的消息里出现这些字样，就升为重要事件（P1），睡着时也会被叫醒
+    urgent_words: tuple[str, ...] = (
+        "醒醒",
+        "快醒",
+        "起床",
+        "紧急",
+        "急事",
+        "救命",
+        "快来",
+        "马上",
+    )
+    # 每次思考最多处理几条事件、正文合计多少字；剩下的稍后再处理
+    batch_events: int = 8
+    batch_chars: int = 3000
+    # 剩下的事件够格时，隔多久再处理一批
+    followup_s: float = 120.0
+    # 同类事件每多等这么多分钟，相当于简单一级
+    aging_min: float = 10.0
+    # 在队里等超过这么久的事件升一级，最多升到 P2
+    promote_after_min: float = 30.0
+    # 日常状态下 P3 先攒一会儿再处理，两次由 P3 触发的思考至少隔这么久
+    p3_gather_s: float = 45.0
+    p3_min_gap_min: float = 5.0
+    p3_tired_gap_min: float = 15.0
+
+
 class PersonaParams(_Params):
     sleep: SleepParams = Field(default_factory=SleepParams)
     affect: AffectParams = Field(default_factory=AffectParams)
@@ -197,6 +250,8 @@ class PersonaParams(_Params):
     mind: MindParams = Field(default_factory=MindParams)
     memory: MemoryParams = Field(default_factory=MemoryParams)
     people: PeopleParams = Field(default_factory=PeopleParams)
+    stamina: StaminaParams = Field(default_factory=StaminaParams)
+    interrupts: InterruptParams = Field(default_factory=InterruptParams)
 
 
 def load_params(path: Path) -> PersonaParams:
