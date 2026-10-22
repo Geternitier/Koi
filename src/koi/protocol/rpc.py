@@ -14,6 +14,7 @@
   koi/approvals -> [Approval]
   koi/approval/resolve {id, approved} -> {}
   koi/audit {limit} -> [AuditRecord]
+  koi/media {text, frames: [{path, t}], energy_cost} -> {}
 """
 
 import asyncio

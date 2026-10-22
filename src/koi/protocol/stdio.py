@@ -24,6 +24,7 @@ from koi.protocol import (
     ImageData,
     Interaction,
     InteractionRequest,
+    MediaFrame,
     MemorySnapshot,
     Plugin,
 )
@@ -103,6 +104,18 @@ class RemoteContext:
 
     async def delete_secret(self, name: str) -> None:
         await self._peer.request("koi/secret/delete", {"name": name})
+
+    async def offer_media(
+        self, text: str, frames: list[MediaFrame], *, energy_cost: float = 0.0
+    ) -> None:
+        await self._peer.request(
+            "koi/media",
+            {
+                "text": text,
+                "frames": [frame.model_dump() for frame in frames],
+                "energy_cost": energy_cost,
+            },
+        )
 
 
 def serve_stdio(plugin: Plugin) -> None:

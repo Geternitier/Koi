@@ -1,5 +1,6 @@
 """LLM 驱动的 Mind。"""
 
+import base64
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any, Protocol, TypeVar
@@ -15,6 +16,7 @@ from koi.persona.mind import (
     EventAppraisal,
     Perception,
     Reply,
+    SeenImage,
     ToolCall,
     WakeContext,
     WakeOutcome,
@@ -88,10 +90,24 @@ class LLMMind:
         self._redact = redact or (lambda s: s)
         self._system = system_prompt(profile)
 
-    def _messages(self, user: str) -> list[dict[str, str]]:
+    def _messages(self, user: str, images: list[SeenImage] | None = None) -> list[dict[str, Any]]:
+        text = self._redact(user)
+        content: str | list[dict[str, Any]] = text
+        if images:
+            parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+            for image in images:
+                encoded = base64.b64encode(image.data).decode("ascii")
+                parts.append({"type": "text", "text": image.caption})
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{image.media_type};base64,{encoded}"},
+                    }
+                )
+            content = parts
         return [
             {"role": "system", "content": self._system},
-            {"role": "user", "content": self._redact(user)},
+            {"role": "user", "content": content},
         ]
 
     def _cost(self, usage: Usage) -> float:
@@ -120,7 +136,16 @@ class LLMMind:
 
     async def act(self, ctx: WakeContext, decisions: list[WillDecision]) -> WakeOutcome:
         out, usage = await self.llm.chat_json(
-            self._messages(act_prompt(ctx, decisions, self.profile, self.calm_threshold)),
+            self._messages(
+                act_prompt(
+                    ctx,
+                    decisions,
+                    self.profile,
+                    self.calm_threshold,
+                    max_tool_calls=self.params.max_tool_calls_per_round,
+                ),
+                ctx.images,
+            ),
             ActOutput,
             model=self.params.model,
             temperature=self.params.act_temperature,

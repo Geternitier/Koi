@@ -67,7 +67,7 @@ class PersonaState(BaseModel):
     owner_channel: str | None = None
     last_proactive_at: datetime | None = None
     will_ledger: dict[str, WillEntry] = Field(default_factory=dict)
-    # 正在处理主人交办的事，截止到这个时间可以用工具
+    # 旧字段。工具不再按这个时间开关，保留是为了旧存档还能读。
     owner_task_until: datetime | None = None
     memory: MemoryState = Field(default_factory=MemoryState)
 
