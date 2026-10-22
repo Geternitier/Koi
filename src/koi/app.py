@@ -298,7 +298,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         host.add(ProcessPlugin(spec, env=env))
 
     def sendable() -> list[tuple[str, str]]:
-        """她能发到网页上的图片。以后工具产出的图也登记在这里，Web 侧不用改。"""
+        """她的形象图清单；工具产出的 out-… 由核心登记，通过工具结果给 ID。"""
         items = [("avatar", "头像")] if appearance.avatar else []
         return items + [(img.id, img.caption or img.id) for img in appearance.images]
 
@@ -308,9 +308,11 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
         for pid, c in host.tools():
             params = dict(c.parameters)
             if pid == "web" and c.name == "send_image":
-                if not images:
-                    continue
-                params["image"] = "图片 ID：" + "、".join(f"{i}（{cap}）" for i, cap in images)
+                hint = "工具结果里给你的 out-… 图片 ID"
+                if images:
+                    hint = "图片 ID：" + "、".join(f"{i}（{cap}）" for i, cap in images)
+                    hint += "，或工具结果里的 out-…"
+                params["image"] = hint
             specs.append(
                 ToolSpec(
                     name=f"{pid}.{c.name}",
@@ -349,6 +351,7 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
             SeenImage(caption=caption, media_type=media_type, data=data)
             for caption, media_type, data in host.load_images(plugin_id, refs)
         ],
+        image_registrar=host.register_images,
     )
 
     def _iso(value: datetime | None) -> str | None:
@@ -456,7 +459,10 @@ async def _run(args: argparse.Namespace, instance: Instance, port: int) -> None:
 
     def image(image_id: str) -> ImageData | None:
         img = appearance.get(image_id)
-        return ImageData(info=image_info(img), data=img.data) if img is not None else None
+        if img is not None:
+            return ImageData(info=image_info(img), data=img.data)
+        # 工具产出的图（out-…）由插件宿主登记
+        return host.get_image(image_id)
 
     host.set_state_provider(state)
     host.set_memory_provider(memory_view)

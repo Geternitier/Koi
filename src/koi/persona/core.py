@@ -77,6 +77,8 @@ Actuator = Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 Toolbox = Callable[[], list[ToolSpec]]
 # (插件 ID, 事件里的 images 或 frames) -> 这一次能看见的图片
 MediaLoader = Callable[[str, list[dict[str, Any]]], list[SeenImage]]
+# (插件 ID, 工具结果里的 images) -> [(图片 ID, 说明)]
+ImageRegistrar = Callable[[str, list[dict[str, Any]]], list[tuple[str, str]]]
 MAX_MEDIA_ENERGY = 30.0
 
 WAKE_TEXT = {
@@ -170,6 +172,7 @@ class Persona:
         owner_call: str = "主人",
         people: People | None = None,
         media_loader: MediaLoader | None = None,
+        image_registrar: ImageRegistrar | None = None,
     ) -> None:
         self.params = params
         self.clock = clock
@@ -185,6 +188,7 @@ class Persona:
         self.owner_call = owner_call
         self.people = people or People(owner_call=owner_call)
         self.media_loader = media_loader
+        self.image_registrar = image_registrar
         self._ref_offset = reference_mid_sleep_offset(params.sleep)
         self.state = state or self._initial_state()
         self._lock = asyncio.Lock()
@@ -799,6 +803,7 @@ class Persona:
             result = await self.actuator(plugin, capability, call.args)
             ok = bool(result.get("ok", True))
             waiting = bool(result.get("needs_approval"))
+            result = self._register_tool_images(plugin, result)
             text = json.dumps(result, ensure_ascii=False, default=str)
         except Exception as e:
             ok, text = False, f"{type(e).__name__}: {e}"
@@ -812,6 +817,29 @@ class Persona:
             args = args[:120] + "……"
         self._journal(self.clock.now(), "tool", f"{call.tool} {args}：{'成功' if ok else '失败'}")
         return ToolResult(tool=call.tool, args=call.args, ok=ok, result=text)
+
+    def _register_tool_images(self, plugin: str, result: dict[str, Any]) -> dict[str, Any]:
+        """工具画好的图交给核心登记，再把路径换成 out-… 的 ID 给她。
+
+        登记失败（文件没了/路径不合法）时把 images 去掉，不把坏路径塞给她。
+        """
+        if self.image_registrar is None:
+            return result
+        refs = result.get("images")
+        if not isinstance(refs, list) or not refs:
+            return result
+        try:
+            registered = self.image_registrar(plugin, refs)
+        except Exception:
+            log.exception("登记工具图片失败：%s", plugin)
+            registered = []
+        if registered:
+            result["images"] = [
+                {"id": image_id, "caption": caption} for image_id, caption in registered
+            ]
+        else:
+            result.pop("images", None)
+        return result
 
     def _apply_media_cost(self, events: list[Event]) -> None:
         for event in events:

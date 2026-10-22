@@ -643,7 +643,9 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 
 `GET /api/memory` 需要 `owner_ui` 权限，且核心侧的 `mind.share_memory` 默认关闭：关闭时只返回日记与待整理的数量，打开后才返回最近 10 篇日记正文（单篇截断到约 1500 字）和笔记本。日记正文只进入主人界面，不会写进事件、日志或审计。
 
-**图片消息**：事件里的 `payload.images` 只有工作目录内的相对路径和说明（例如 `{"path": "images/<id>.png", "caption": "主人发来的图片（cat.jpg）"}`），字节留在 `data/web/images/`，不进事件、历史、经历记录和日记；历史与 SSE 里只有 `{id, url, media_type, sha256, alt}`。核心在下次思考时按插件工作目录读取并校验（PNG/JPEG/WebP，单张 ≤5 MiB），坏路径或坏文件跳过。她发图用 `web.send_image` 能力（`tool=True`，参数 `image`、`caption`）：`image` 是核心登记的不透明 ID，目前是 `avatar`、`ref-*`，下个迭代工具产出的图登记成新 ID 后也走同一条路，Web 侧不用改。
+**图片消息**：事件里的 `payload.images` 只有工作目录内的相对路径和说明（例如 `{"path": "images/<id>.png", "caption": "主人发来的图片（cat.jpg）"}`），字节留在 `data/web/images/`，不进事件、历史、经历记录和日记；历史与 SSE 里只有 `{id, url, media_type, sha256, alt}`。核心在下次思考时按插件工作目录读取并校验（PNG/JPEG/WebP，单张 ≤5 MiB），坏路径或坏文件跳过。她发图用 `web.send_image` 能力（`tool=True`，参数 `image`、`caption`）：`image` 是核心登记的不透明 ID，目前是 `avatar`、`ref-*`，工具产出的图也会登记成 `out-<sha>`（见下）。Web 侧不用改。
+
+**工具产出的图片**：工具结果可以带 `images: [{"path": "outputs/1.png", "caption": "画好的图"}]`（路径相对插件工作目录）。`Persona._run_tool` 调 `PluginHost.register_images` 读图、按 SHA-256 登记成 `out-<sha12>`，把结果改写成 `images: [{id, caption}]`；`ctx.image` 先查形象图、再查共享图。她在同一轮里就能用 `web.send_image` 把这些 ID 发到网页；历史里仍然只有 `{id, url, media_type, sha256, alt}`。共享图只记在内存里，Koi 重启后旧 ID 失效；插件清理输出文件后也可能 404，前端会隐藏坏图。
 
 启动：`koi run [DIR] [--port N] [--model deepseek-chat] [--no-harness] [-v]`（见 §6.10），然后打开界面。API key 从用户变量 `CHAT_DEEPSEEK` 读取，日志经 `RedactingFilter` 脱敏。
 
@@ -666,7 +668,7 @@ W = w_0 - \text{aversion} + c_v\cdot v + c_E\cdot\frac{E-50}{50} - c_a\cdot\max(
 | | `koi/interaction/request`、`update`、`close` | 请主人扫码、填写（需要 `interact` 权限），见下文"交互请求" |
 | | `koi/interactions`、`koi/interaction/submit`、`cancel` | 展示和提交交互请求（需要 `owner_ui` 权限，目前只有 Web 插件有） |
 | | `koi/secret/get`、`set`、`delete` | 读写自己的凭据（名字须在核心侧配置的 `secrets` 里） |
-| | `koi/media` | 提交她刚看见的画面：说明、工作目录内的 JPEG 相对路径、精力消耗。事件只存路径；下一次思考再读文件 |
+| | `koi/media` | 提交她刚看见的画面：说明、工作目录内的 JPEG 相对路径、可选的 caption、精力消耗。事件只存路径和说明；下一次思考再读文件 |
 | 核心 → 插件 | `koi/interaction/changed`（通知） | 交互请求有了结果：主人填写的值、取消或过期 |
 
 **监管**（`koi.kernel.process.ProcessPlugin`）：

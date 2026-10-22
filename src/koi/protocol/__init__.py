@@ -152,9 +152,9 @@ class MemorySnapshot(BaseModel):
 
 
 class ImageInfo(BaseModel):
-    # avatar，或参考图 ref-1、ref-2……
+    # avatar、参考图 ref-1、ref-2……，或工具产出的 out-…
     id: str
-    kind: Literal["avatar", "reference"]
+    kind: Literal["avatar", "reference", "generated"]
     caption: str = ""
     media_type: str
     # 内容的 SHA-256，图片换了它就变，可以当缓存版本号
@@ -177,6 +177,8 @@ class MediaFrame(BaseModel):
     path: str
     # 在视频里的秒数，核心换成「第 N 秒」给她看
     t: float = 0.0
+    # 给她看的说明，例如「画好的图」；为空时按 t 生成时间点
+    caption: str = ""
 
 
 class ImageRef(BaseModel):

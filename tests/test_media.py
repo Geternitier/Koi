@@ -312,3 +312,25 @@ async def test_act_sees_owner_images():
     assert "主人发来的图片（cat.png）" in joined
     assert any(part.get("type") == "image_url" for part in act[1]["content"])
     assert "iVBOR" not in str(persona.journal.recent(20))
+
+
+async def test_offer_media_keeps_caption_for_still_image(tmp_path):
+    root = tmp_path / "comfy"
+    (root / "outputs").mkdir(parents=True)
+    (root / "outputs" / "a.jpg").write_bytes(JPEG)
+    bus = EventBus()
+    host = PluginHost(bus, RealClock())
+    host.add(_Plugin("comfy"))
+    host.set_work_dir("comfy", root)
+
+    host.offer_media(
+        "comfy",
+        "画好了",
+        [MediaFrame(path="outputs/a.jpg", caption="画好的图")],
+        energy_cost=3,
+    )
+    await asyncio.gather(*host._tasks)
+
+    event = bus.pending[0]
+    assert event.payload["frames"] == [{"path": "outputs/a.jpg", "t": 0.0, "caption": "画好的图"}]
+    assert host.load_images("comfy", event.payload["frames"]) == [("画好的图", "image/jpeg", JPEG)]

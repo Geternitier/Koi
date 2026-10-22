@@ -5,9 +5,11 @@
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,7 @@ from koi.protocol import (
     Capability,
     EventIn,
     ImageData,
+    ImageInfo,
     Interaction,
     InteractionRequest,
     Manifest,
@@ -58,6 +61,8 @@ AUDIT_SUMMARY_CHARS = 500
 _LEGACY_PRIORITY = {0: Priority.P2, 1: Priority.P3, 2: Priority.P3, 3: Priority.P4}
 # 每个插件每小时最多发几条 P1，超出的降级，防止插件靠抬级插队
 P1_PER_HOUR = 3
+# 工具产出的图片最多记这么多张，超出按登记顺序丢最旧的
+MAX_SHARED_IMAGES = 128
 
 StateProvider = Callable[[], dict[str, Any]]
 MemoryProvider = Callable[[], dict[str, Any]]
@@ -70,8 +75,34 @@ class PluginError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class SharedImage:
+    """工具产出的图片。path 相对插件工作目录，读取时才碰文件。"""
+
+    id: str
+    plugin: str
+    path: str
+    caption: str
+    media_type: str
+    sha256: str
+    size: int
+
+
 def _clip(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n] + f"……（共 {len(text)} 字）"
+
+
+def _image_caption(ref: dict[str, Any]) -> str:
+    """图片的说明：优先用插件给的 caption，其次按视频时间点，最后是「图片」。"""
+    caption = ref.get("caption")
+    if isinstance(caption, str) and caption.strip():
+        return caption.strip()
+    if "t" in ref:
+        try:
+            return frame_caption(float(ref.get("t") or 0))
+        except (TypeError, ValueError):
+            return ""
+    return "图片"
 
 
 class _Context:
@@ -221,6 +252,8 @@ class PluginHost:
         self._appearance_provider: AppearanceProvider | None = None
         self._image_provider: ImageProvider | None = None
         self._work_dirs: dict[str, Path] = {}
+        # 工具产出的图片：out-<sha> -> 路径与说明
+        self._shared_images: dict[str, SharedImage] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         # 插件 ID -> 最近发 P1 的时间
         self._p1_times: dict[str, list[datetime]] = {}
@@ -281,9 +314,13 @@ class PluginHost:
             try:
                 path = resolve_frame(root, frame.path)
                 read_frame(path)
-                stored.append({"path": relative_posix(root, path), "t": frame.t})
             except MediaError as e:
                 raise PluginError(str(e)) from e
+            item: dict[str, Any] = {"path": relative_posix(root, path), "t": frame.t}
+            caption = frame.caption.strip()
+            if caption:
+                item["caption"] = caption
+            stored.append(item)
         summary = _clip(text.strip(), MEDIA_TEXT_CHARS)
         if not summary and not stored:
             raise PluginError("没有可看的内容")
@@ -343,21 +380,80 @@ class PluginHost:
             rel = ref.get("path")
             if not isinstance(rel, str):
                 continue
-            caption = ref.get("caption")
-            if not isinstance(caption, str) or not caption.strip():
-                if "t" in ref:
-                    try:
-                        caption = frame_caption(float(ref.get("t") or 0))
-                    except (TypeError, ValueError):
-                        caption = ""
-                else:
-                    caption = "图片"
             try:
                 data, media_type = read_image(resolve_image(root, rel))
             except (MediaError, OSError):
                 continue
-            loaded.append((caption.strip(), media_type, data))
+            loaded.append((_image_caption(ref), media_type, data))
         return loaded
+
+    def register_images(self, plugin_id: str, refs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+        """把工具产出的图片登记成 out-<sha>，返回 [(ID, 说明)]。
+
+        只读插件工作目录内的 PNG/JPEG/WebP；坏路径、坏文件跳过。
+        """
+        root = self._work_dirs.get(plugin_id)
+        if root is None:
+            return []
+        registered: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for ref in refs[:MAX_FRAMES]:
+            if not isinstance(ref, dict):
+                continue
+            rel = ref.get("path")
+            if not isinstance(rel, str):
+                continue
+            try:
+                path = resolve_image(root, rel)
+                data, media_type = read_image(path)
+            except (MediaError, OSError):
+                continue
+            sha = hashlib.sha256(data).hexdigest()
+            image_id = f"out-{sha[:12]}"
+            if image_id not in self._shared_images:
+                self._shared_images[image_id] = SharedImage(
+                    id=image_id,
+                    plugin=plugin_id,
+                    path=relative_posix(root, path),
+                    caption=_image_caption(ref),
+                    media_type=media_type,
+                    sha256=sha,
+                    size=len(data),
+                )
+                self._trim_shared_images()
+            if image_id in seen:
+                continue
+            seen.add(image_id)
+            registered.append((image_id, self._shared_images[image_id].caption))
+        return registered
+
+    def _trim_shared_images(self) -> None:
+        while len(self._shared_images) > MAX_SHARED_IMAGES:
+            self._shared_images.pop(next(iter(self._shared_images)))
+
+    def get_image(self, image_id: str) -> ImageData | None:
+        """按 ID 取工具产出的图片。文件被删/路径失效时返回 None。"""
+        image = self._shared_images.get(image_id)
+        if image is None:
+            return None
+        root = self._work_dirs.get(image.plugin)
+        if root is None:
+            return None
+        try:
+            data, media_type = read_image(resolve_image(root, image.path))
+        except (MediaError, OSError):
+            return None
+        return ImageData(
+            info=ImageInfo(
+                id=image.id,
+                kind="generated",
+                caption=image.caption,
+                media_type=media_type,
+                sha256=image.sha256,
+                size=len(data),
+            ),
+            data=data,
+        )
 
     @property
     def plugin_ids(self) -> list[str]:

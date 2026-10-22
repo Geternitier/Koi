@@ -8,7 +8,16 @@ from pydantic import BaseModel
 
 from koi.kernel import Event, EventBus, Priority, Scheduler, SimClock, Trust
 from koi.kernel.llm import Usage
-from koi.persona import Journal, Persona, PersonaParams, PersonaProfile, Status, WakeReason
+from koi.persona import (
+    Journal,
+    Persona,
+    PersonaParams,
+    PersonaProfile,
+    Status,
+    ToolCall,
+    ToolSpec,
+    WakeReason,
+)
 from koi.persona.llm_mind import ActOutput, LLMMind, PerceiveOutput
 from koi.persona.mind import SeenImage
 from koi.persona.params import AffectParams, SleepParams
@@ -355,3 +364,60 @@ async def test_self_images_are_attached_only_when_looking_at_images():
     # 没有新图片时不附自己的照片
     await mind.act(ctx, [])
     assert isinstance(llm.messages[1][1]["content"], str)
+
+
+async def test_tool_images_are_registered_and_replaced_with_ids():
+    async def actuator(plugin, capability, args):
+        return {"ok": True, "images": [{"path": "outputs/a.png", "caption": "画好的图"}]}
+
+    seen = []
+
+    def registrar(plugin, refs):
+        seen.append((plugin, refs))
+        return [("out-abc", "画好的图")]
+
+    clock = SimClock(T0)
+    persona = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=LLMMind(_MessageLLM(), PROFILE, PARAMS.mind),
+        journal=Journal(),
+        actuator=actuator,
+        image_registrar=registrar,
+    )
+    tools = [ToolSpec(name="comfy.generate")]
+    result = await persona._run_tool(ToolCall(tool="comfy.generate", args={"prompt": "猫"}), tools)
+    assert seen == [("comfy", [{"path": "outputs/a.png", "caption": "画好的图"}])]
+    assert '"id": "out-abc"' in result.result
+    assert "outputs/a.png" not in result.result
+
+    # 没有登记器时保持原样；登记失败时去掉 images，不把坏路径塞给她
+    plain = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=LLMMind(_MessageLLM(), PROFILE, PARAMS.mind),
+        journal=Journal(),
+        actuator=actuator,
+    )
+    raw = await plain._run_tool(ToolCall(tool="comfy.generate", args={}), tools)
+    assert "outputs/a.png" in raw.result
+
+    def boom(plugin, refs):
+        raise RuntimeError("坏图")
+
+    failing = Persona(
+        PARAMS,
+        clock=clock,
+        scheduler=Scheduler(clock),
+        bus=EventBus(),
+        mind=LLMMind(_MessageLLM(), PROFILE, PARAMS.mind),
+        journal=Journal(),
+        actuator=actuator,
+        image_registrar=boom,
+    )
+    failed = await failing._run_tool(ToolCall(tool="comfy.generate", args={}), tools)
+    assert '"images"' not in failed.result

@@ -568,3 +568,32 @@ def test_journal_persists_and_prunes(tmp_path):
     assert [e.text for e in restored.recent(10)] == ["现在"]
     j.prune(now.date())
     assert sorted(p.stem for p in tmp_path.iterdir()) == ["2026-10-20"]
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+
+
+async def test_register_images_and_get_by_id(tmp_path):
+    root = tmp_path / "comfy"
+    (root / "outputs").mkdir(parents=True)
+    (root / "outputs" / "a.png").write_bytes(PNG)
+    host = PluginHost(EventBus(), RealClock())
+    host.add(_Echo())
+    host.set_work_dir("echo", root)
+
+    first = host.register_images("echo", [{"path": "outputs/a.png", "caption": "画好的图"}])
+    assert len(first) == 1
+    image_id, caption = first[0]
+    assert image_id.startswith("out-") and caption == "画好的图"
+    # 同一张图重复登记，返回同一个 ID 和第一次的说明
+    assert host.register_images("echo", [{"path": "outputs/a.png"}]) == [(image_id, "画好的图")]
+    image = host.get_image(image_id)
+    assert image is not None
+    assert image.info.kind == "generated"
+    assert image.info.id == image_id
+    assert image.data == PNG
+    assert host.get_image("out-nope") is None
+    assert (
+        host.register_images("echo", [{"path": "../x.png"}, {"path": "missing.png"}, {"path": 3}])
+        == []
+    )
